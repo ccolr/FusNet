@@ -77,7 +77,7 @@ class AFF(nn.Module):
         sum_local = self.local_att(sum)
         att_sum = sum_glob + sum_local
 
-        return x * self.sigmoid(att_sum) + y * (1 - self.sigmoid(att_sum))
+        return 2 * x * self.sigmoid(att_sum) + 2 * y * (1 - self.sigmoid(att_sum))
 
 
 class iAFF(nn.Module):
@@ -108,7 +108,6 @@ class iAFF(nn.Module):
             nn.Conv2d(inter_channels, out_channels, kernel_size=1, stride=1, padding=0),
             nn.BatchNorm2d(out_channels),
         )
-        self.sigmoid = nn.Sigmoid()
 
         # local attention2
         self.local_att_2 = nn.Sequential(
