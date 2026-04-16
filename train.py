@@ -339,7 +339,7 @@ def evaluate_confusion_matrix(model, loader, device):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train FusNet_new for bamboo binary segmentation")
+    parser = argparse.ArgumentParser(description="Train FusNet for bamboo binary segmentation")
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size")
     parser.add_argument("--epochs", type=int, default=120, help="Training epochs")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
@@ -349,17 +349,17 @@ def main():
     set_seed(42)
 
     try:
-        from model.FusNet_new import FusNet
+        from model.FusNet import FusNet
     except ModuleNotFoundError as exc:
         raise ModuleNotFoundError(
-            "Import FusNet_new failed. Please ensure required dependencies are installed (for example `mamba_ssm`)."
+            "Import FusNet failed. Please ensure required dependencies are installed (for example `mamba_ssm`)."
         ) from exc
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     amp_enabled = device.type == "cuda"
     num_workers = min(8, os.cpu_count() if os.cpu_count() is not None else 2)
 
-    output_dir = os.path.join("fusnet_new_outputs")
+    output_dir = os.path.join("fusnet_outputs")
     os.makedirs(output_dir, exist_ok=True)
     log_path = os.path.join(output_dir, "log.txt")
     best_weight_path = os.path.join(output_dir, "best_model.pth")
