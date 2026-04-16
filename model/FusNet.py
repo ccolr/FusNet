@@ -72,7 +72,7 @@ class DecodeBlock(nn.Module):
     def __init__(self, in_channels, skip_channels, out_channels, scale_factor=2):
         super().__init__()
         self.scale_factor = scale_factor
-        fuse_channels = in_channels + skip_channels
+        # fuse_channels = in_channels + skip_channels
 
         # 跳跃连接通道对齐（1×1conv压缩到out_channels）
         self.skip_proj = (
@@ -155,13 +155,29 @@ class FusNet(nn.Module):
         self.global_gate_s2 = GlobalFeedbackGate(ch_global=768, ch_local=dim_feat)
         self.global_gate_s3 = GlobalFeedbackGate(ch_global=768, ch_local=dim_feat)
 
+        # ── 跳跃连接投影（Res2Net压到dim_feat再与fused相加）───
+        # res_f2: 1024→dim_feat，用于14×14
+        # res_f1: 512→dim_feat， 用于28×28
+        self.skip_proj = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Conv2d(1024, dim_feat, kernel_size=1, bias=False),
+                    nn.BatchNorm2d(dim_feat),
+                    nn.ReLU(inplace=True),
+                ),
+                nn.Sequential(
+                    nn.Conv2d(512, dim_feat, kernel_size=1, bias=False), nn.BatchNorm2d(dim_feat), nn.ReLU(inplace=True)
+                ),
+            ]
+        )
+
         # ── 解码器（FPN式，Res2Net各层作为跳跃连接）────────────
         # 输入特征维度：dim_feat（7×7）
         # 跳跃连接维度：Res2Net layer2=1024(14×14), layer1=512(28×28), layer0=256(56×56)
         self.decoder = nn.ModuleList(
             [
-                DecodeBlock(dim_feat, skip_channels=1024, out_channels=256, scale_factor=2),  # 7→14
-                DecodeBlock(256, skip_channels=512, out_channels=128, scale_factor=2),  # 14→28
+                DecodeBlock(dim_feat, skip_channels=dim_feat, out_channels=256, scale_factor=2),  # 7→14
+                DecodeBlock(256, skip_channels=dim_feat, out_channels=128, scale_factor=2),  # 14→28
                 DecodeBlock(128, skip_channels=256, out_channels=64, scale_factor=2),  # 28→56
                 DecodeBlock(64, skip_channels=0, out_channels=64, scale_factor=4),  # 56→224
             ]
@@ -251,14 +267,21 @@ class FusNet(nn.Module):
         fused[0] = self.global_gate_s2(mamba_f3, fused[0])
         fused[1] = self.global_gate_s3(mamba_f3, fused[1])
 
-        # ── 4. FPN式解码器 ──────────────────────────────────────
+        # ── 4. 跳跃连接：Res2Net压维后与fused相加 ─────────────
+        # 14×14：res_f2(1024) → dim_feat，再加fused[1]
+        # 28×28：res_f1(512)  → dim_feat，再加fused[0]
+        skip_14 = self.skip_proj[0](res_f2) + fused[1]  # (B, dim_feat, 14×14)
+        skip_28 = self.skip_proj[1](res_f1) + fused[0]  # (B, dim_feat, 28×28)
+        skip_56 = res_f0  # (B, 256,      56×56)
+
+        # ── 5. FPN式解码器 ──────────────────────────────────────
         # 跳跃连接来自Res2Net原始输出（未经iAFF，保留完整细节）
-        skips = [res_f2, res_f1, res_f0, None]
+        skips = [skip_14, skip_28, skip_56, None]
 
         x_dec = fused[2]  # 从最深层开始 (B, dim_feat, 7×7)
         for i, (decode_block, skip) in enumerate(zip(self.decoder, skips)):
             x_dec = decode_block(x_dec, skip)
 
-        # ── 5. 分割输出 ─────────────────────────────────────────
+        # ── 6. 分割输出 ─────────────────────────────────────────
         out = self.seg_head(x_dec)  # (B, num_classes, 224×224)
         return out
