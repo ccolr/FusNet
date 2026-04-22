@@ -16,7 +16,6 @@ import rasterio
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import DataLoader, Dataset
 
 
@@ -280,7 +279,7 @@ def run_epoch(
         if train_mode:
             optimizer.zero_grad(set_to_none=True)
 
-        with autocast(enabled=amp_enabled):
+        with torch.amp.autocast(device_type="cuda", enabled=amp_enabled):
             logits = model(images)
             if isinstance(logits, (tuple, list)):
                 logits = logits[0]
@@ -407,7 +406,7 @@ def main():
         T_max=args.epochs,
         eta_min=max(args.lr * 0.01, 1e-6),
     )
-    scaler = GradScaler(enabled=amp_enabled)
+    scaler = torch.amp.GradScaler(device="cuda", enabled=amp_enabled)
     bce_loss = nn.BCEWithLogitsLoss()
     dice_loss = DiceLoss()
 
