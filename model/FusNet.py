@@ -13,6 +13,44 @@ from model.AFFUtils import iAFF
 # ─────────────────────────────────────────────
 
 
+class RGBChannelAttention(nn.Module):
+    """
+    对 RGB 三个通道分别加权增强，使网络对绿色区域更加敏感。
+    """
+
+    def __init__(self, channels, reduction=16):
+        super().__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)  # 全局平均池化
+        self.fc = nn.Sequential(
+            nn.Linear(channels, channels // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channels // reduction, channels, bias=False),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1)
+        return x * y  # 每个通道按权重放大或缩小
+
+
+class TextureConv(nn.Module):
+    """
+    增强局部纹理特征，对竹叶颗粒感敏感。
+    """
+
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False)
+        nn.init.kaiming_normal_(self.conv.weight)
+        self.bn = nn.BatchNorm2d(out_channels)
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        return self.relu(self.bn(self.conv(x)))
+
+
 class SpatialGate(nn.Module):
     """
     用Res2Net layer0的输出生成空间注意力权重图。
@@ -119,6 +157,9 @@ class FusNet(nn.Module):
         super().__init__()
 
         self.dim_feat = dim_feat
+        self.rgb_channel_attention = RGBChannelAttention(64)  # RGB通道注意力模块
+        self.texture_conv = TextureConv(64, 64)  # 纹理增强卷积模块
+        self.project = nn.Conv2d(192, 64, kernel_size=1)
 
         # ── Backbones ──────────────────────────────────────────
         self.resnet = res2net50_v1b_26w_4s(pretrained=True)
@@ -193,6 +234,10 @@ class FusNet(nn.Module):
         x = self.resnet.bn1(x)
         x = self.resnet.relu(x)
         x = self.resnet.maxpool(x)
+        x_tex = self.texture_conv(x)
+        x_rgb = self.rgb_channel_attention(x)
+        x = torch.cat([x_tex, x_rgb, x], dim=1)
+        x = self.project(x)
         f0 = self.resnet.layer1(x)  # (B, 256,  56×56)
         f1 = self.resnet.layer2(f0)  # (B, 512,  28×28)
         f2 = self.resnet.layer3(f1)  # (B, 1024, 14×14)
