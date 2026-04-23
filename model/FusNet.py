@@ -244,89 +244,83 @@ class FusNet(nn.Module):
         f3 = self.resnet.layer4(f2)  # (B, 2048, 7×7)
         return f0, f1, f2, f3
 
-    def _extract_swin(self, x, spatial_guide):
-        """提取Swin各层特征，patch_embed后注入空间引导。"""
-        B = x.shape[0]
-        tokens, H, W = self.swin.patch_embed(x)  # (B, N, 96)
-        tokens = self.swin.pos_drop(tokens)
+    def _swin_stage(self, tokens, H, W, layer_idx):
+        """运行Swin单个stage，接受token输入，返回增强后的feature map和新token。"""
+        B = tokens.shape[0]
+        tokens, H, W = self.swin.layers[layer_idx](tokens, H, W)
+        # layers[0]→192, layers[1]→384, layers[2]→768
+        ch = tokens.shape[-1]
+        feat = tokens.permute(0, 2, 1).view(B, ch, H, W)
+        return tokens, H, W, feat
 
-        # 空间引导：将gate插值到patch尺度后调制token
-        guide = F.interpolate(spatial_guide, size=(H, W), mode="bilinear", align_corners=False)  # (B,1,H,W)
-        guide = guide.flatten(2).transpose(1, 2)  # (B, N, 1)
-        tokens = tokens * guide
+    def _mamba_stage(self, feat, level_idx):
+        """运行MambaVision单个level，接受feature map，返回下一level的feature map。"""
+        return self.mamba.levels[level_idx](feat)
 
-        tokens, H, W = self.swin.layers[0](tokens, H, W)
-        f1 = tokens.permute(0, 2, 1).view(B, 192, H, W)  # (B, 192, 28×28)
-        tokens, H, W = self.swin.layers[1](tokens, H, W)
-        f2 = tokens.permute(0, 2, 1).view(B, 384, H, W)  # (B, 384, 14×14)
-        tokens, H, W = self.swin.layers[2](tokens, H, W)
-        f3 = tokens.permute(0, 2, 1).view(B, 768, H, W)  # (B, 768, 7×7)
-        return f1, f2, f3
-
-    def _extract_mamba(self, x, spatial_guide):
-        """提取MambaVision各层特征，patch_embed后注入空间引导。"""
-        feat = self.mamba.patch_embed(x)  # (B, 96, 56×56)
-
-        # 空间引导
-        guide = F.interpolate(spatial_guide, size=feat.shape[2:], mode="bilinear", align_corners=False)
-        feat = feat * guide
-
-        f1 = self.mamba.levels[0](feat)  # (B, 192, 28×28)
-        f2 = self.mamba.levels[1](f1)  # (B, 384, 14×14)
-        f3 = self.mamba.levels[2](f2)  # (B, 768, 7×7)
-        return f1, f2, f3
-
-    # ──────────────────────────────────────────────────────────
     def forward(self, x):
-        # ── 1. 特征提取 ────────────────────────────────────────
+        # ── 1. Res2Net完整提取 ─────────────────────────────────────
         res_f0, res_f1, res_f2, res_f3 = self._extract_res2net(x)
 
         # 用Res2Net layer0生成空间引导
         spatial_guide = self.spatial_gate(res_f0)  # (B, 1, 56×56)
 
-        swin_f1, swin_f2, swin_f3 = self._extract_swin(x, spatial_guide)
-        mamba_f1, mamba_f2, mamba_f3 = self._extract_mamba(x, spatial_guide)
+        # ── 2. Swin patch_embed + 空间引导 ─────────────────────────
+        B = x.shape[0]
+        swin_tokens, H, W = self.swin.patch_embed(x)  # (B, N, 96)
+        swin_tokens = self.swin.pos_drop(swin_tokens)
+        guide = F.interpolate(spatial_guide, size=(H, W), mode="bilinear", align_corners=False)
+        guide = guide.flatten(2).transpose(1, 2)  # (B, N, 1)
+        swin_tokens = swin_tokens * guide
 
-        # ── 2. 串行iAFF融合（三个stage）────────────────────────
+        # ── 3. Mamba patch_embed + 空间引导 ────────────────────────
+        mamba_feat = self.mamba.patch_embed(x)  # (B, 96, 56×56)
+        guide_m = F.interpolate(spatial_guide, size=mamba_feat.shape[2:], mode="bilinear", align_corners=False)
+        mamba_feat = mamba_feat * guide_m
+
+        # ── 4. 逐stage交替提取 + iAFF融合 ─────────────────────────
         res_feats = [res_f1, res_f2, res_f3]
-        swin_feats = [swin_f1, swin_f2, swin_f3]
-        mamba_feats = [mamba_f1, mamba_f2, mamba_f3]
-
         fused = []
-        for i in range(3):
-            # Step1: Res2Net → Swin（Swin是主体，被Res2Net调制）
-            swin_enh = self.iaff_res_swin[i](swin_feats[i], res_feats[i])
 
-            # Step2: Swin_enhanced → Mamba（Mamba是主体，被增强后的Swin调制）
-            mamba_enh = self.iaff_swin_mamba[i](mamba_feats[i], swin_enh)
+        for i in range(3):
+            # Swin 第 i 个stage（输入为上一步的token，或patch_embed后的token）
+            swin_tokens, H, W, swin_feat = self._swin_stage(swin_tokens, H, W, layer_idx=i)
+
+            # Mamba 第 i 个level（输入为上一步的feature map）
+            mamba_feat = self._mamba_stage(mamba_feat, level_idx=i)
+
+            # Step1: Res2Net → Swin iAFF（Swin主体，Res2Net调制）
+            swin_enh = self.iaff_res_swin[i](swin_feat, res_feats[i])
+
+            # Step2: Swin_enhanced → Mamba iAFF（Mamba主体，增强后的Swin调制）
+            mamba_enh = self.iaff_swin_mamba[i](mamba_feat, swin_enh)
 
             # Step3: 三路投影对齐后相加
             f = self.proj_add[i](res_feats[i], swin_enh, mamba_enh)
-            fused.append(f)  # 每个 (B, dim_feat, H, W)
+            fused.append(f)
 
-        # fused[0]: (B, dim_feat, 28×28)
-        # fused[1]: (B, dim_feat, 14×14)
-        # fused[2]: (B, dim_feat, 7×7)
+            # ★ 关键：将增强后的特征回写，作为下一stage的输入
+            # Swin：将swin_enh转回token格式
+            swin_tokens = swin_enh.flatten(2).transpose(1, 2)  # (B, N, C)
+            # Mamba：直接用mamba_enh作为下一level的输入
+            mamba_feat = mamba_enh
 
-        # ── 3. 全局反馈门控（用mamba stage4调制浅层融合特征）──
+        # ── 5. 全局反馈门控 ────────────────────────────────────────
+        # mamba_f3 即最后一个stage的mamba_enh
+        mamba_f3 = mamba_enh  # (B, 768, 7×7)
         fused[0] = self.global_gate_s2(mamba_f3, fused[0])
         fused[1] = self.global_gate_s3(mamba_f3, fused[1])
 
-        # ── 4. 跳跃连接：Res2Net压维后与fused相加 ─────────────
-        # 14×14：res_f2(1024) → dim_feat，再加fused[1]
-        # 28×28：res_f1(512)  → dim_feat，再加fused[0]
-        skip_14 = self.skip_proj[0](res_f2) + fused[1]  # (B, dim_feat, 14×14)
-        skip_28 = self.skip_proj[1](res_f1) + fused[0]  # (B, dim_feat, 28×28)
-        skip_56 = res_f0  # (B, 256,      56×56)
+        # ── 6. 跳跃连接 ────────────────────────────────────────────
+        skip_14 = self.skip_proj[0](res_f2) + fused[1]
+        skip_28 = self.skip_proj[1](res_f1) + fused[0]
+        skip_56 = res_f0
 
-        # ── 5. FPN式解码器 ──────────────────────────────────────
-        # 跳跃连接来自Res2Net原始输出（未经iAFF，保留完整细节）
+        # ── 7. FPN式解码器 ──────────────────────────────────────────
         skips = [skip_14, skip_28, skip_56, None]
-
-        x_dec = fused[2]  # 从最深层开始 (B, dim_feat, 7×7)
-        for i, (decode_block, skip) in enumerate(zip(self.decoder, skips)):
+        x_dec = fused[2]
+        for decode_block, skip in zip(self.decoder, skips):
             x_dec = decode_block(x_dec, skip)
 
-        # ── 6. 分割输出 ─────────────────────────────────────────
-        out = self.seg_head(x_dec)  # (B, num_classes, 224×224)
+        # ── 8. 分割输出 ─────────────────────────────────────────────
+        out = self.seg_head(x_dec)
         return out
