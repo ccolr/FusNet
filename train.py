@@ -179,7 +179,7 @@ def confusion_stats(pred: torch.Tensor, target: torch.Tensor):
     return tp, tn, fp, fn
 
 
-#! 指标数学上正确, 但是mIoU定义不标准, F1 和 Dice 重复, OA = accuracy 冗余
+# TODO 指标数学上正确, 但是mIoU定义不标准, F1 和 Dice 重复, OA = accuracy 冗余
 def metrics_from_confusion(tp: float, tn: float, fp: float, fn: float):
     eps = 1e-8
     accuracy = (tp + tn) / (tp + tn + fp + fn + eps)
