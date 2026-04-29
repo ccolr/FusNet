@@ -179,26 +179,17 @@ def confusion_stats(pred: torch.Tensor, target: torch.Tensor):
     return tp, tn, fp, fn
 
 
-# TODO 指标数学上正确, 但是mIoU定义不标准, F1 和 Dice 重复, OA = accuracy 冗余
-def metrics_from_confusion(tp: float, tn: float, fp: float, fn: float):
+def metrics_from_confusion(tp, tn, fp, fn):
     eps = 1e-8
-    accuracy = (tp + tn) / (tp + tn + fp + fn + eps)
-    oa = accuracy
-    recall = tp / (tp + fn + eps)
-    precision = tp / (tp + fp + eps)
-    f1 = 2.0 * precision * recall / (precision + recall + eps)
-    dice = 2.0 * tp / (2.0 * tp + fp + fn + eps)
-    iou_pos = tp / (tp + fp + fn + eps)
-    iou_neg = tn / (tn + fp + fn + eps)
-    miou = (iou_pos + iou_neg) / 2.0
-    return {
-        "acc": accuracy,
-        "oa": oa,
-        "recall": recall,
-        "f1": f1,
-        "dice": dice,
-        "miou": miou,
-    }
+    accuracy   = (tp + tn) / (tp + tn + fp + fn + eps)
+    recall     = tp / (tp + fn + eps)
+    precision  = tp / (tp + fp + eps)
+    f1         = 2.0 * precision * recall / (precision + recall + eps)
+    iou_bamboo = tp / (tp + fp + fn + eps)   # 竹林类 IoU
+    iou_bg     = tn / (tn + fp + fn + eps)   # 背景类 IoU
+    miou       = (iou_bamboo + iou_bg) / 2.0
+    return {"acc": accuracy, "recall": recall, "f1": f1,
+            "iou_bamboo": iou_bamboo, "miou": miou}
 
 
 def plot_curve(train_values, val_values, ylabel, title, save_path):
@@ -252,68 +243,54 @@ def plot_confusion_matrix(cm: np.ndarray, class_names, save_path):
     plt.close(fig)
 
 
-def run_epoch(
-    model,
-    loader,
-    optimizer,
-    scaler,
-    bce_loss,
-    dice_loss,
-    device,
-    train_mode: bool,
-    amp_enabled: bool,
-):
-    if train_mode:
-        model.train()
-    else:
-        model.eval()
+def run_epoch(model, loader, device, train_mode, amp_enabled,
+                bce_loss=None, dice_loss=None, optimizer=None, scaler=None):
+    model.train() if train_mode else model.eval()
 
     total_loss = 0.0
-    tp_total, tn_total, fp_total, fn_total = 0, 0, 0, 0
-    n_samples = 0
+    tp_total = tn_total = fp_total = fn_total = n_samples = 0
 
-    for images, masks in loader:
-        images = images.to(device, non_blocking=True)
-        masks = masks.to(device, non_blocking=True).float()
-        n_samples += images.size(0)
+    ctx = torch.enable_grad() if train_mode else torch.no_grad()
+    with ctx:
+        for images, masks in loader:
+            images = images.to(device, non_blocking=True)
+            masks  = masks.to(device, non_blocking=True).float()
+            n_samples += images.size(0)
 
-        if train_mode:
-            optimizer.zero_grad(set_to_none=True)
+            if train_mode:
+                optimizer.zero_grad(set_to_none=True)
 
-        with torch.amp.autocast(device_type="cuda", enabled=amp_enabled):
-            logits = model(images)
-            if isinstance(logits, (tuple, list)):
-                logits = logits[0]
-            if logits.shape[-2:] != masks.shape[-2:]:
-                logits = F.interpolate(logits, size=masks.shape[-2:], mode="bilinear", align_corners=False)
-            binary_logits = get_binary_logits(logits)
+            with torch.amp.autocast(device_type="cuda", enabled=amp_enabled):
+                logits = model(images)
+                if isinstance(logits, (tuple, list)):
+                    logits = logits[0]
+                if logits.shape[-2:] != masks.shape[-2:]:
+                    logits = F.interpolate(logits, size=masks.shape[-2:],
+                                            mode="bilinear", align_corners=False)
+                binary_logits = get_binary_logits(logits)
 
-            bce = bce_loss(binary_logits, masks)
-            dice = dice_loss(binary_logits, masks)
-            loss = 0.8 * bce + 0.2 * dice
+                bce  = bce_loss(binary_logits, masks)
+                dice = dice_loss(binary_logits, masks)
+                loss = 0.5 * bce + 0.5 * dice  # 更均衡
 
-        if train_mode:
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-            scaler.step(optimizer)
-            scaler.update()
+            if train_mode:
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                scaler.step(optimizer)
+                scaler.update()
+                total_loss += loss.item() * images.size(0)
 
-        probs = torch.sigmoid(binary_logits)
-        preds = (probs >= 0.5).long()
-        gt = (masks >= 0.5).long()
-
-        tp, tn, fp, fn = confusion_stats(preds, gt)
-        tp_total += tp
-        tn_total += tn
-        fp_total += fp
-        fn_total += fn
-        total_loss += loss.item() * images.size(0)
+            probs = torch.sigmoid(binary_logits)
+            preds = (probs >= 0.5).long()
+            gt    = (masks  >= 0.5).long()
+            tp, tn, fp, fn = confusion_stats(preds, gt)
+            tp_total += tp; tn_total += tn
+            fp_total += fp; fn_total += fn
 
     avg_loss = total_loss / max(n_samples, 1)
-    metrics = metrics_from_confusion(tp_total, tn_total, fp_total, fn_total)
+    metrics  = metrics_from_confusion(tp_total, tn_total, fp_total, fn_total)
     return avg_loss, metrics
-
 
 def evaluate_confusion_matrix(model, loader, device):
     model.eval()
@@ -424,7 +401,8 @@ def main():
         f.write(
             "Epoch,LR,"
             "Train_Loss,Val_Loss,Train_Acc,Val_Acc,"
-            "Train_mIoU,Val_mIoU,Train_F1,Val_F1,Train_Recall,Val_Recall,Train_OA,Val_OA,Train_Dice,Val_Dice\n"
+            "Train_mIoU,Val_mIoU,Train_IoU_Bamboo,Val_IoU_Bamboo,"
+            "Train_F1,Val_F1,Train_Recall,Val_Recall\n"
         )
 
     for epoch in range(1, args.epochs + 1):
@@ -443,8 +421,6 @@ def main():
         val_loss, val_metrics = run_epoch(
             model=model,
             loader=valid_loader,
-            optimizer=optimizer,
-            scaler=scaler,
             bce_loss=bce_loss,
             dice_loss=dice_loss,
             device=device,
@@ -464,18 +440,21 @@ def main():
             f.write(
                 f"{epoch},{current_lr:.8f},"
                 f"{train_loss:.6f},{val_loss:.6f},{train_metrics['acc']:.6f},{val_metrics['acc']:.6f},"
-                f"{train_metrics['miou']:.6f},{val_metrics['miou']:.6f},{train_metrics['f1']:.6f},{val_metrics['f1']:.6f},"
-                f"{train_metrics['recall']:.6f},{val_metrics['recall']:.6f},{train_metrics['oa']:.6f},{val_metrics['oa']:.6f},"
-                f"{train_metrics['dice']:.6f},{val_metrics['dice']:.6f}\n"
+                f"{train_metrics['miou']:.6f},{val_metrics['miou']:.6f},"
+                f"{train_metrics['iou_bamboo']:.6f},{val_metrics['iou_bamboo']:.6f},"
+                f"{train_metrics['f1']:.6f},{val_metrics['f1']:.6f},"
+                f"{train_metrics['recall']:.6f},{val_metrics['recall']:.6f}\n"
             )
 
         print(
             f"Epoch [{epoch:03d}/{args.epochs}] "
             f"LR={current_lr:.6e} | "
-            f"Train: Loss={train_loss:.4f}, Acc={train_metrics['acc']:.4f}, mIoU={train_metrics['miou']:.4f}, "
-            f"F1={train_metrics['f1']:.4f}, Recall={train_metrics['recall']:.4f}, OA={train_metrics['oa']:.4f}, Dice={train_metrics['dice']:.4f} | "
-            f"Val: Loss={val_loss:.4f}, Acc={val_metrics['acc']:.4f}, mIoU={val_metrics['miou']:.4f}, "
-            f"F1={val_metrics['f1']:.4f}, Recall={val_metrics['recall']:.4f}, OA={val_metrics['oa']:.4f}, Dice={val_metrics['dice']:.4f}"
+            f"Train: Loss={train_loss:.4f}, Acc={train_metrics['acc']:.4f}, "
+            f"mIoU={train_metrics['miou']:.4f}, IoU={train_metrics['iou_bamboo']:.4f}, "
+            f"F1={train_metrics['f1']:.4f}, Recall={train_metrics['recall']:.4f} | "
+            f"Val: Loss={val_loss:.4f}, Acc={val_metrics['acc']:.4f}, "
+            f"mIoU={val_metrics['miou']:.4f}, IoU={val_metrics['iou_bamboo']:.4f}, "
+            f"F1={val_metrics['f1']:.4f}, Recall={val_metrics['recall']:.4f}"
         )
 
         plot_curve(
