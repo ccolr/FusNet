@@ -323,6 +323,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train FusNet for bamboo binary segmentation")
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size")
     parser.add_argument("--epochs", type=int, default=120, help="Training epochs")
+    # parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--data_dir", type=str, default=".", help="Data root directory")
     args = parser.parse_args()
 

@@ -4,7 +4,7 @@ Heterogeneous Cross-Attention (HCA) Fusion Module
 用于三路异构backbone（Res2Net / Swin-T / MambaVision）的中间特征融合。
 
 设计原则：
-  - 每路特征作为Q，另外两路concat后作为KV
+  - 每路特征作为Q，另外两路作为KV
   - 各路独立LayerNorm，处理异构特征分布差异
   - 残差连接保护每路backbone的主体特征
   - 支持多头注意力
@@ -128,7 +128,6 @@ class SingleBranchCrossAttention(nn.Module):
             x_k1 = self.kv_pool(x_k1)
             x_k2 = self.kv_pool(x_k2)
 
-        # 两路 KV 按通道 concat → 联合 K/V 投影
         kv1 = rearrange(x_k1, "b c h w -> b (h w) c")
         kv2 = rearrange(x_k2, "b c h w -> b (h w) c")
 
