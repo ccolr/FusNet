@@ -5,100 +5,12 @@ import torch.nn.functional as F
 from model.mamba_vision import mamba_vision_S
 from model.res2net import res2net50_v1b_26w_4s
 from model.swin import swin_tiny_patch4_window7_224
-from model.AFFUtils import iAFF
+from model.HCABlock import HCABlock
 
 
 # ─────────────────────────────────────────────
 # 子模块
 # ─────────────────────────────────────────────
-
-
-class RGBChannelAttention(nn.Module):
-    """
-    对 RGB 三个通道分别加权增强，使网络对绿色区域更加敏感。
-    """
-
-    def __init__(self, channels, reduction=16):
-        super().__init__()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)  # 全局平均池化
-        self.fc = nn.Sequential(
-            nn.Linear(channels, channels // reduction, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Linear(channels // reduction, channels, bias=False),
-            nn.Sigmoid(),
-        )
-
-    def forward(self, x):
-        b, c, _, _ = x.size()
-        y = self.avg_pool(x).view(b, c)
-        y = self.fc(y).view(b, c, 1, 1)
-        return x * y  # 每个通道按权重放大或缩小
-
-
-class TextureConv(nn.Module):
-    """
-    增强局部纹理特征，对竹叶颗粒感敏感。
-    """
-
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False)
-        nn.init.kaiming_normal_(self.conv.weight)
-        self.bn = nn.BatchNorm2d(out_channels)
-        self.relu = nn.ReLU(inplace=True)
-
-    def forward(self, x):
-        return self.relu(self.bn(self.conv(x)))
-
-
-class SpatialGate(nn.Module):
-    """
-    用Res2Net layer0的输出生成空间注意力权重图。
-    输出shape: (B, 1, H, W)，用于调制patch_embed的输出。
-    """
-
-    def __init__(self, in_channels):
-        super().__init__()
-        self.gate = nn.Sequential(nn.Conv2d(in_channels, 1, kernel_size=1, bias=False), nn.Sigmoid())
-
-    def forward(self, x):
-        return self.gate(x)  # (B, 1, H, W)
-
-
-class ProjectionAdd(nn.Module):
-    """
-    将三路不同通道数的特征分别用1×1conv投影到同一维度后相加。
-    """
-
-    def __init__(self, ch_res, ch_swin, ch_mamba, dim_out):
-        super().__init__()
-        self.proj_res = nn.Conv2d(ch_res, dim_out, kernel_size=1, bias=False)
-        self.proj_swin = nn.Conv2d(ch_swin, dim_out, kernel_size=1, bias=False)
-        self.proj_mamba = nn.Conv2d(ch_mamba, dim_out, kernel_size=1, bias=False)
-        self.norm = nn.BatchNorm2d(dim_out)
-        self.act = nn.ReLU(inplace=True)
-
-    def forward(self, feat_res, feat_swin, feat_mamba):
-        return self.act(self.norm(self.proj_res(feat_res) + self.proj_swin(feat_swin) + self.proj_mamba(feat_mamba)))
-
-
-class GlobalFeedbackGate(nn.Module):
-    """
-    用最深层的Mamba全局特征生成通道门控，调制浅层融合特征。
-    只在编码器末尾做一次，不是每个stage都做。
-    """
-
-    def __init__(self, ch_global, ch_local):
-        super().__init__()
-        self.gap = nn.AdaptiveAvgPool2d(1)
-        self.gate = nn.Sequential(nn.Linear(ch_global, ch_local, bias=False), nn.Sigmoid())
-
-    def forward(self, feat_global, feat_local):
-        # feat_global: (B, ch_global, H, W)
-        # feat_local:  (B, ch_local,  H, W)
-        g = self.gap(feat_global).flatten(1)  # (B, ch_global)
-        w = self.gate(g).unsqueeze(-1).unsqueeze(-1)  # (B, ch_local, 1, 1)
-        return feat_local * w
 
 
 class DecodeBlock(nn.Module):
@@ -110,9 +22,7 @@ class DecodeBlock(nn.Module):
     def __init__(self, in_channels, skip_channels, out_channels, scale_factor=2):
         super().__init__()
         self.scale_factor = scale_factor
-        # fuse_channels = in_channels + skip_channels
 
-        # 跳跃连接通道对齐（1×1conv压缩到out_channels）
         self.skip_proj = (
             nn.Conv2d(skip_channels, out_channels, kernel_size=1, bias=False) if skip_channels > 0 else None
         )
@@ -144,82 +54,88 @@ class DecodeBlock(nn.Module):
 
 class FusNet(nn.Module):
     """
-    三路编码器（Res2Net + Swin-T + MambaVision）串行iAFF融合
+    三路编码器（Res2Net + Swin-T + MambaVision）四阶段 HCA 融合
     + FPN式解码器用于遥感竹林分割。
 
+    各阶段通道数：
+        Stage1 (56×56): Res2Net layer1=256,  Swin stem=96,   Mamba patch_embed=96
+        Stage2 (28×28): Res2Net layer2=512,  Swin layer0=192, Mamba level0=192
+        Stage3 (14×14): Res2Net layer3=1024, Swin layer1=384, Mamba level1=384
+        Stage4 (7×7):   Res2Net layer4=2048, Swin layer2=768, Mamba level2=768
+
     Args:
-        num_classes:  分割类别数
-        dim_feat:     三路投影对齐的公共特征维度（默认256）
-        iaff_r:       iAFF模块的reduction ratio（默认4）
+        num_classes : 分割类别数
+        dim_feat    : HCA 输出的公共特征维度（默认256）
+        num_heads   : HCA 多头注意力头数（默认8）
     """
 
-    def __init__(self, num_classes=2, dim_feat=256, iaff_r=4):
+    def __init__(self, num_classes=2, dim_feat=256, num_heads=8):
         super().__init__()
 
         self.dim_feat = dim_feat
-        self.rgb_channel_attention = RGBChannelAttention(64)  # RGB通道注意力模块
-        self.texture_conv = TextureConv(64, 64)  # 纹理增强卷积模块
-        self.project = nn.Conv2d(192, 64, kernel_size=1)
 
         # ── Backbones ──────────────────────────────────────────
         self.resnet = res2net50_v1b_26w_4s(pretrained=True)
         self.swin = swin_tiny_patch4_window7_224(pretrained=True)
-        self.mamba = mamba_vision_S(pretrained=True, model_path="./model/pretrained/mambavision_small_1k.pth.tar")
-
-        # ── 空间注意力引导（Res2Net layer0 → patch_embed引导）──
-        self.spatial_gate = SpatialGate(in_channels=256)
-
-        # ── 串行iAFF（每个stage两个：Res→Swin, Swin→Mamba）──
-        # 通道数参考：
-        #   stage2: res=512,  swin=192, mamba=192
-        #   stage3: res=1024, swin=384, mamba=384
-        #   stage4: res=2048, swin=768, mamba=768
-        stage_channels = [
-            (512, 192, 192),
-            (1024, 384, 384),
-            (2048, 768, 768),
-        ]
-        self.iaff_res_swin = nn.ModuleList()
-        self.iaff_swin_mamba = nn.ModuleList()
-        for ch_res, ch_swin, ch_mamba in stage_channels:
-            self.iaff_res_swin.append(iAFF(in_channels_1=ch_swin, in_channels_2=ch_res, out_channels=ch_swin, r=iaff_r))
-            self.iaff_swin_mamba.append(
-                iAFF(in_channels_1=ch_mamba, in_channels_2=ch_swin, out_channels=ch_mamba, r=iaff_r)
-            )
-
-        # ── 三路投影相加（每个stage一个ProjectionAdd）──────────
-        self.proj_add = nn.ModuleList(
-            [ProjectionAdd(ch_res, ch_swin, ch_mamba, dim_feat) for ch_res, ch_swin, ch_mamba in stage_channels]
+        self.mamba = mamba_vision_S(
+            pretrained=True,
+            model_path="./model/pretrained/mambavision_small_1k.pth.tar",
         )
 
-        # ── 全局反馈门控（Mamba stage4 → 调制stage2/3的融合特征）
-        self.global_gate_s2 = GlobalFeedbackGate(ch_global=768, ch_local=dim_feat)
-        self.global_gate_s3 = GlobalFeedbackGate(ch_global=768, ch_local=dim_feat)
-
-        # ── 跳跃连接投影（Res2Net压到dim_feat再与fused相加）───
-        # res_f2: 1024→dim_feat，用于14×14
-        # res_f1: 512→dim_feat， 用于28×28
-        self.skip_proj = nn.ModuleList(
+        # ── 四阶段 HCA 融合模块 ─────────────────────────────────
+        # kv_stride: 高分辨率stage用2以节省显存，低分辨率stage用1
+        # Stage1 (56×56): in=[256, 96,  96],  kv_stride=2
+        # Stage2 (28×28): in=[512, 192, 192], kv_stride=2
+        # Stage3 (14×14): in=[1024,384, 384], kv_stride=1
+        # Stage4 (7×7):   in=[2048,768, 768], kv_stride=1
+        self.hca_stages = nn.ModuleList(
             [
-                nn.Sequential(
-                    nn.Conv2d(1024, dim_feat, kernel_size=1, bias=False),
-                    nn.BatchNorm2d(dim_feat),
-                    nn.ReLU(inplace=True),
+                HCABlock(
+                    in_channels=[256, 96, 96],
+                    out_channels=dim_feat,
+                    num_heads=num_heads,
+                    kv_stride=2,
+                    ffn_ratio=4.0,
+                    use_pos_bias=False,  # stride>1时pos_bias自动关闭，这里显式标记
                 ),
-                nn.Sequential(
-                    nn.Conv2d(512, dim_feat, kernel_size=1, bias=False), nn.BatchNorm2d(dim_feat), nn.ReLU(inplace=True)
+                HCABlock(
+                    in_channels=[512, 192, 192],
+                    out_channels=dim_feat,
+                    num_heads=num_heads,
+                    kv_stride=2,
+                    ffn_ratio=4.0,
+                    use_pos_bias=False,
+                ),
+                HCABlock(
+                    in_channels=[1024, 384, 384],
+                    out_channels=dim_feat,
+                    num_heads=num_heads,
+                    kv_stride=1,
+                    ffn_ratio=4.0,
+                    use_pos_bias=True,
+                ),
+                HCABlock(
+                    in_channels=[2048, 768, 768],
+                    out_channels=dim_feat,
+                    num_heads=num_heads,
+                    kv_stride=1,
+                    ffn_ratio=4.0,
+                    use_pos_bias=True,
                 ),
             ]
         )
 
-        # ── 解码器（FPN式，Res2Net各层作为跳跃连接）────────────
-        # 输入特征维度：dim_feat（7×7）
-        # 跳跃连接维度：Res2Net layer2=1024(14×14), layer1=512(28×28), layer0=256(56×56)
+        # ── 解码器（FPN式）─────────────────────────────────────
+        # 解码路径：
+        #   fused[3] (7×7,   dim_feat) → ×2 → cat(skip=fused[2], 14×14)  → 256
+        #   256      (14×14, 256)      → ×2 → cat(skip=fused[1], 28×28)  → 128
+        #   128      (28×28, 128)      → ×2 → cat(skip=fused[0], 56×56)  → 64
+        #   64       (56×56, 64)       → ×4 → (no skip)                  → 64
         self.decoder = nn.ModuleList(
             [
                 DecodeBlock(dim_feat, skip_channels=dim_feat, out_channels=256, scale_factor=2),  # 7→14
                 DecodeBlock(256, skip_channels=dim_feat, out_channels=128, scale_factor=2),  # 14→28
-                DecodeBlock(128, skip_channels=256, out_channels=64, scale_factor=2),  # 28→56
+                DecodeBlock(128, skip_channels=dim_feat, out_channels=64, scale_factor=2),  # 28→56
                 DecodeBlock(64, skip_channels=0, out_channels=64, scale_factor=4),  # 56→224
             ]
         )
@@ -229,98 +145,93 @@ class FusNet(nn.Module):
 
     # ──────────────────────────────────────────────────────────
     def _extract_res2net(self, x):
-        """提取Res2Net各层特征，返回layer0~layer3的输出。"""
+        """
+        提取 Res2Net 四个阶段特征。
+        Returns:
+            f1: (B, 256,  56×56)  layer1
+            f2: (B, 512,  28×28)  layer2
+            f3: (B, 1024, 14×14)  layer3
+            f4: (B, 2048, 7×7)    layer4
+        """
         x = self.resnet.conv1(x)
         x = self.resnet.bn1(x)
         x = self.resnet.relu(x)
         x = self.resnet.maxpool(x)
-        x_tex = self.texture_conv(x)
-        x_rgb = self.rgb_channel_attention(x)
-        x = torch.cat([x_tex, x_rgb, x], dim=1)
-        x = self.project(x)
-        f0 = self.resnet.layer1(x)  # (B, 256,  56×56)
-        f1 = self.resnet.layer2(f0)  # (B, 512,  28×28)
-        f2 = self.resnet.layer3(f1)  # (B, 1024, 14×14)
-        f3 = self.resnet.layer4(f2)  # (B, 2048, 7×7)
-        return f0, f1, f2, f3
+        f1 = self.resnet.layer1(x)  # (B, 256,  56×56)
+        f2 = self.resnet.layer2(f1)  # (B, 512,  28×28)
+        f3 = self.resnet.layer3(f2)  # (B, 1024, 14×14)
+        f4 = self.resnet.layer4(f3)  # (B, 2048, 7×7)
+        return f1, f2, f3, f4
 
-    def _swin_stage(self, tokens, H, W, layer_idx):
-        """运行Swin单个stage，接受token输入，返回增强后的feature map和新token。"""
-        B = tokens.shape[0]
-        tokens, H, W = self.swin.layers[layer_idx](tokens, H, W)
-        # layers[0]→192, layers[1]→384, layers[2]→768
-        ch = tokens.shape[-1]
-        feat = tokens.permute(0, 2, 1).view(B, ch, H, W)
-        return tokens, H, W, feat
-
-    def _mamba_stage(self, feat, level_idx):
-        """运行MambaVision单个level，接受feature map，返回下一level的feature map。"""
-        return self.mamba.levels[level_idx](feat)
-
-    def forward(self, x):
-        # ── 1. Res2Net完整提取 ─────────────────────────────────────
-        res_f0, res_f1, res_f2, res_f3 = self._extract_res2net(x)
-
-        # 用Res2Net layer0生成空间引导
-        spatial_guide = self.spatial_gate(res_f0)  # (B, 1, 56×56)
-
-        # ── 2. Swin patch_embed + 空间引导 ─────────────────────────
+    def _extract_swin(self, x):
+        """
+        提取 Swin-T 四个阶段特征。
+        Returns:
+            f1: (B, 96,  56×56)  patch_embed 后（stem）
+            f2: (B, 192, 28×28)  layers[0] 后
+            f3: (B, 384, 14×14)  layers[1] 后
+            f4: (B, 768, 7×7)    layers[2] 后
+        """
         B = x.shape[0]
-        swin_tokens, H, W = self.swin.patch_embed(x)  # (B, N, 96)
-        swin_tokens = self.swin.pos_drop(swin_tokens)
-        guide = F.interpolate(spatial_guide, size=(H, W), mode="bilinear", align_corners=False)
-        guide = guide.flatten(2).transpose(1, 2)  # (B, N, 1)
-        swin_tokens = swin_tokens * guide
+        tokens, H, W = self.swin.patch_embed(x)  # (B, N, 96), H=56, W=56
+        tokens = self.swin.pos_drop(tokens)
 
-        # ── 3. Mamba patch_embed + 空间引导 ────────────────────────
-        mamba_feat = self.mamba.patch_embed(x)  # (B, 96, 56×56)
-        guide_m = F.interpolate(spatial_guide, size=mamba_feat.shape[2:], mode="bilinear", align_corners=False)
-        mamba_feat = mamba_feat * guide_m
+        # Stage1: stem 输出，直接还原空间维度
+        f1 = tokens.permute(0, 2, 1).view(B, 96, H, W)  # (B, 96, 56×56)
 
-        # ── 4. 逐stage交替提取 + iAFF融合 ─────────────────────────
-        res_feats = [res_f1, res_f2, res_f3]
-        fused = []
+        tokens, H, W = self.swin.layers[0](tokens, H, W)
+        f2 = tokens.permute(0, 2, 1).view(B, 192, H, W)  # (B, 192, 28×28)
 
-        for i in range(3):
-            # Swin 第 i 个stage（输入为上一步的token，或patch_embed后的token）
-            swin_tokens, H, W, swin_feat = self._swin_stage(swin_tokens, H, W, layer_idx=i)
+        tokens, H, W = self.swin.layers[1](tokens, H, W)
+        f3 = tokens.permute(0, 2, 1).view(B, 384, H, W)  # (B, 384, 14×14)
 
-            # Mamba 第 i 个level（输入为上一步的feature map）
-            mamba_feat = self._mamba_stage(mamba_feat, level_idx=i)
+        tokens, H, W = self.swin.layers[2](tokens, H, W)
+        f4 = tokens.permute(0, 2, 1).view(B, 768, H, W)  # (B, 768, 7×7)
 
-            # Step1: Res2Net → Swin iAFF（Swin主体，Res2Net调制）
-            swin_enh = self.iaff_res_swin[i](swin_feat, res_feats[i])
+        return f1, f2, f3, f4
 
-            # Step2: Swin_enhanced → Mamba iAFF（Mamba主体，增强后的Swin调制）
-            mamba_enh = self.iaff_swin_mamba[i](mamba_feat, swin_enh)
+    def _extract_mamba(self, x):
+        """
+        提取 MambaVision 四个阶段特征。
+        Returns:
+            f1: (B, 96,  56×56)  patch_embed 后（stem）
+            f2: (B, 192, 28×28)  levels[0] 后
+            f3: (B, 384, 14×14)  levels[1] 后
+            f4: (B, 768, 7×7)    levels[2] 后
+        """
+        f1 = self.mamba.patch_embed(x)  # (B, 96, 56×56)
+        f2 = self.mamba.levels[0](f1)  # (B, 192, 28×28)
+        f3 = self.mamba.levels[1](f2)  # (B, 384, 14×14)
+        f4 = self.mamba.levels[2](f3)  # (B, 768, 7×7)
+        return f1, f2, f3, f4
 
-            # Step3: 三路投影对齐后相加
-            f = self.proj_add[i](res_feats[i], swin_enh, mamba_enh)
-            fused.append(f)
+    # ──────────────────────────────────────────────────────────
+    def forward(self, x):
+        # ── 1. 三路特征提取 ────────────────────────────────────
+        res_f1, res_f2, res_f3, res_f4 = self._extract_res2net(x)
+        swin_f1, swin_f2, swin_f3, swin_f4 = self._extract_swin(x)
+        mamba_f1, mamba_f2, mamba_f3, mamba_f4 = self._extract_mamba(x)
 
-            # ★ 关键：将增强后的特征回写，作为下一stage的输入
-            # Swin：将swin_enh转回token格式
-            swin_tokens = swin_enh.flatten(2).transpose(1, 2)  # (B, N, C)
-            # Mamba：直接用mamba_enh作为下一level的输入
-            mamba_feat = mamba_enh
+        # ── 2. 四阶段 HCA 融合 ─────────────────────────────────
+        # fused[0]: (B, dim_feat, 56×56)  ← 跳跃连接 for 28→56
+        # fused[1]: (B, dim_feat, 28×28)  ← 跳跃连接 for 14→28
+        # fused[2]: (B, dim_feat, 14×14)  ← 跳跃连接 for 7→14
+        # fused[3]: (B, dim_feat, 7×7)    ← 解码器输入
+        fused = [
+            self.hca_stages[0](res_f1, swin_f1, mamba_f1),  # 56×56
+            self.hca_stages[1](res_f2, swin_f2, mamba_f2),  # 28×28
+            self.hca_stages[2](res_f3, swin_f3, mamba_f3),  # 14×14
+            self.hca_stages[3](res_f4, swin_f4, mamba_f4),  # 7×7
+        ]
 
-        # ── 5. 全局反馈门控 ────────────────────────────────────────
-        # mamba_f3 即最后一个stage的mamba_enh
-        mamba_f3 = mamba_enh  # (B, 768, 7×7)
-        fused[0] = self.global_gate_s2(mamba_f3, fused[0])
-        fused[1] = self.global_gate_s3(mamba_f3, fused[1])
+        # ── 3. FPN 式解码 ──────────────────────────────────────
+        # 跳跃连接顺序：fused[2](14×14) → fused[1](28×28) → fused[0](56×56) → None
+        skips = [fused[2], fused[1], fused[0], None]
 
-        # ── 6. 跳跃连接 ────────────────────────────────────────────
-        skip_14 = self.skip_proj[0](res_f2) + fused[1]
-        skip_28 = self.skip_proj[1](res_f1) + fused[0]
-        skip_56 = res_f0
-
-        # ── 7. FPN式解码器 ──────────────────────────────────────────
-        skips = [skip_14, skip_28, skip_56, None]
-        x_dec = fused[2]
+        x_dec = fused[3]  # 从最深层出发 (B, dim_feat, 7×7)
         for decode_block, skip in zip(self.decoder, skips):
             x_dec = decode_block(x_dec, skip)
 
-        # ── 8. 分割输出 ─────────────────────────────────────────────
-        out = self.seg_head(x_dec)
+        # ── 4. 分割输出 ────────────────────────────────────────
+        out = self.seg_head(x_dec)  # (B, num_classes, 224×224)
         return out
