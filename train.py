@@ -17,7 +17,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
-
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
 MEAN = [55.7578, 67.4502, 58.6568]
 STD = [37.5201, 34.2345, 30.3007]
@@ -245,51 +245,55 @@ def plot_confusion_matrix(cm: np.ndarray, class_names, save_path):
 
 def run_epoch(model, loader, device, train_mode, amp_enabled,
                 bce_loss=None, dice_loss=None, optimizer=None, scaler=None):
-    model.train() if train_mode else model.eval()
+    if train_mode:
+        model.train()
+    else:
+        model.eval()
 
     total_loss = 0.0
-    tp_total = tn_total = fp_total = fn_total = n_samples = 0
+    tp_total, tn_total, fp_total, fn_total = 0, 0, 0, 0
+    n_samples = 0
 
-    ctx = torch.enable_grad() if train_mode else torch.no_grad()
-    with ctx:
-        for images, masks in loader:
-            images = images.to(device, non_blocking=True)
-            masks  = masks.to(device, non_blocking=True).float()
-            n_samples += images.size(0)
+    for images, masks in loader:
+        images = images.to(device, non_blocking=True)
+        masks = masks.to(device, non_blocking=True).float()
+        n_samples += images.size(0)
 
-            if train_mode:
-                optimizer.zero_grad(set_to_none=True)
+        if train_mode:
+            optimizer.zero_grad(set_to_none=True)
 
-            with torch.amp.autocast(device_type="cuda", enabled=amp_enabled):
-                logits = model(images)
-                if isinstance(logits, (tuple, list)):
-                    logits = logits[0]
-                if logits.shape[-2:] != masks.shape[-2:]:
-                    logits = F.interpolate(logits, size=masks.shape[-2:],
-                                            mode="bilinear", align_corners=False)
-                binary_logits = get_binary_logits(logits)
+        with torch.amp.autocast(device_type="cuda", enabled=amp_enabled):
+            logits = model(images)
+            if isinstance(logits, (tuple, list)):
+                logits = logits[0]
+            if logits.shape[-2:] != masks.shape[-2:]:
+                logits = F.interpolate(logits, size=masks.shape[-2:], mode="bilinear", align_corners=False)
+            binary_logits = get_binary_logits(logits)
 
-                bce  = bce_loss(binary_logits, masks)
-                dice = dice_loss(binary_logits, masks)
-                loss = 0.5 * bce + 0.5 * dice  # 更均衡
+            bce = bce_loss(binary_logits, masks)
+            dice = dice_loss(binary_logits, masks)
+            loss = 0.5 * bce + 0.5 * dice
 
-            if train_mode:
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-                scaler.step(optimizer)
-                scaler.update()
-                total_loss += loss.item() * images.size(0)
+        if train_mode:
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            scaler.step(optimizer)
+            scaler.update()
 
-            probs = torch.sigmoid(binary_logits)
-            preds = (probs >= 0.5).long()
-            gt    = (masks  >= 0.5).long()
-            tp, tn, fp, fn = confusion_stats(preds, gt)
-            tp_total += tp; tn_total += tn
-            fp_total += fp; fn_total += fn
+        probs = torch.sigmoid(binary_logits)
+        preds = (probs >= 0.5).long()
+        gt = (masks >= 0.5).long()
+
+        tp, tn, fp, fn = confusion_stats(preds, gt)
+        tp_total += tp
+        tn_total += tn
+        fp_total += fp
+        fn_total += fn
+        total_loss += loss.item() * images.size(0)
 
     avg_loss = total_loss / max(n_samples, 1)
-    metrics  = metrics_from_confusion(tp_total, tn_total, fp_total, fn_total)
+    metrics = metrics_from_confusion(tp_total, tn_total, fp_total, fn_total)
     return avg_loss, metrics
 
 def evaluate_confusion_matrix(model, loader, device):
@@ -319,7 +323,6 @@ def main():
     parser = argparse.ArgumentParser(description="Train FusNet for bamboo binary segmentation")
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size")
     parser.add_argument("--epochs", type=int, default=120, help="Training epochs")
-    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--data_dir", type=str, default=".", help="Data root directory")
     args = parser.parse_args()
 
@@ -378,12 +381,17 @@ def main():
     )
 
     model = FusNet(num_classes=2).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer,
-        T_max=args.epochs,
-        eta_min=max(args.lr * 0.01, 1e-6),
-    )
+    optimizer = torch.optim.AdamW([
+        {"params": model.resnet.parameters(),  "lr": 1e-5},  # 预训练backbone用小lr
+        {"params": model.swin.parameters(),    "lr": 1e-5},
+        {"params": model.mamba.parameters(),   "lr": 1e-5},
+        {"params": model.hca_stages.parameters(), "lr": 1e-4},  # 新模块用大lr
+        {"params": model.decoder.parameters(), "lr": 1e-4},
+        {"params": model.seg_head.parameters(),"lr": 1e-4},
+    ], weight_decay=1e-4)
+    warmup = LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=5)
+    cosine = CosineAnnealingLR(optimizer, T_max=args.epochs - 5, eta_min=1e-6)
+    scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[5])
     scaler = torch.amp.GradScaler(device="cuda", enabled=amp_enabled)
     bce_loss = nn.BCEWithLogitsLoss()
     dice_loss = DiceLoss()
