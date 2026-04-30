@@ -162,7 +162,7 @@ def main():
     print(f"Using device: {device}")
 
     from model.FusNet import FusNet
-    model = FusNet(num_classes=2)
+    model = FusNet()
     state = torch.load(args.weights, map_location=device)
     model.load_state_dict(state)
     model.to(device)

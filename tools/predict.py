@@ -27,7 +27,7 @@ STD  = [37.5201 / 255, 34.2345 / 255, 30.3007 / 255]
 
 def load_model(weights_path: str, device: torch.device):
     from model.FusNet import FusNet
-    model = FusNet(num_classes=2)
+    model = FusNet()
     state = torch.load(weights_path, map_location=device)
     model.load_state_dict(state)
     model.to(device).eval()
