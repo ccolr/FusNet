@@ -2,3 +2,4 @@
 /.vscode
 .python-version
 model/FusNet_origin.py
+model/__pycache__
