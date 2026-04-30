@@ -251,12 +251,21 @@ st.caption(
     "to run inference and visualise results."
 )
 
+if "uploader_key" not in st.session_state:
+    st.session_state.uploader_key = 0
+
 uploaded_files = st.file_uploader(
     "Upload images",
     type=["tif", "tiff", "png", "jpg", "jpeg"],
     accept_multiple_files=True,
     label_visibility="collapsed",
+    key=f"uploader_{st.session_state.uploader_key}",
 )
+
+if uploaded_files:
+    if st.button("Clear all", icon="🗑️"):
+        st.session_state.uploader_key += 1
+        st.rerun()
 
 if not uploaded_files:
     st.info("👆 Upload at least one image to get started.", icon="ℹ️")
