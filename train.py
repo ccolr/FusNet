@@ -19,8 +19,8 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
-MEAN = [55.7578, 67.4502, 58.6568]
-STD = [37.5201, 34.2345, 30.3007]
+MEAN = [56.777, 67.8952, 59.0113]
+STD = [37.9482, 34.2724, 30.4053]
 CLASS_NAMES = ["Non-Bamboo", "Bamboo"]
 
 
@@ -381,7 +381,7 @@ def main():
         drop_last=False,
     )
 
-    model = FusNet(num_classes=2).to(device)
+    model = FusNet().to(device)
     optimizer = torch.optim.AdamW([
         {"params": model.resnet.parameters(),  "lr": 1e-5},  # 预训练backbone用小lr
         {"params": model.swin.parameters(),    "lr": 1e-5},
