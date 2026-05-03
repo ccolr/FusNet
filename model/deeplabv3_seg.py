@@ -91,7 +91,7 @@ class DeepLabV3Seg(nn.Module):
 
     def _load_pretrained(self, pretrained_path: str) -> None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        ckpt = torch.load(pretrained_path, map_location=device)
+        ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
         state = ckpt.get("model_state", ckpt.get("state_dict", ckpt.get("model", ckpt)))
 
         own = self.model.state_dict()
