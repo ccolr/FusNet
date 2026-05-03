@@ -19,8 +19,8 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
-MEAN = [56.777, 67.8952, 59.0113]
-STD = [37.9482, 34.2724, 30.4053]
+MEAN = [55.7578, 67.4502, 58.6568]
+STD = [55.7578, 67.4502, 58.6568]
 CLASS_NAMES = ["Non-Bamboo", "Bamboo"]
 
 
