@@ -5,3 +5,4 @@ model/FusNet_origin.py
 model/__pycache__
 /output
 /model/pretrained/
+/DeeplabV3/pretrained/
