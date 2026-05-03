@@ -1,5 +1,5 @@
 """
-Heterogeneous Cross-Attention (HCA) Fusion Module
+Hybrid Cross-Attention (HCA) Fusion Module
 ==================================================
 支持三路或任意两路的可配置融合，用于消融实验。
 
