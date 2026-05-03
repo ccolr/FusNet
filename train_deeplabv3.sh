@@ -1,0 +1,1 @@
+python train_deeplabv3.py --pretrained_path DeeplabV3/pretrained/best_deeplabv3_resnet50_voc_os16.pth
