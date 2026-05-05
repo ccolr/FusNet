@@ -1,9 +1,6 @@
 # FusNet
 
-## Encoder
+## Overall Structure
 
-![FusNet Encoder](./illustrator/FusNet_encoder.png)
+![FusNet Encoder](./illustrator/FusNet.png)
 
-## Decoder
-
-![FusNet decoder](./illustrator/FusNet_decoder.png)
