@@ -1,7 +1,6 @@
 .DS_Store
 .vscode/
 .python-version
-model/FusNet_origin.py
 model/__pycache__
 output/
 model/pretrained/
