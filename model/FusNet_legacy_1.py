@@ -285,21 +285,21 @@ class FusNet(nn.Module):
         x3_dem_1 = self.x3_dem_1(x3)
         x2_dem_1 = self.x2_dem_1(x2)
 
-        x5_4 = self.x5_x4(abs(F.upsample(x5_dem_1, size=x4.size()[2:], mode="bilinear") - x4_dem_1))
-        x4_3 = self.x4_x3(abs(F.upsample(x4_dem_1, size=x3.size()[2:], mode="bilinear") - x3_dem_1))
-        x3_2 = self.x3_x2(abs(F.upsample(x3_dem_1, size=x2.size()[2:], mode="bilinear") - x2_dem_1))
-        x2_1 = self.x2_x1(abs(F.upsample(x2_dem_1, size=x1.size()[2:], mode="bilinear") - x1))
+        x5_4 = self.x5_x4(abs(F.interpolate(x5_dem_1, size=x4.size()[2:], mode="bilinear") - x4_dem_1))
+        x4_3 = self.x4_x3(abs(F.interpolate(x4_dem_1, size=x3.size()[2:], mode="bilinear") - x3_dem_1))
+        x3_2 = self.x3_x2(abs(F.interpolate(x3_dem_1, size=x2.size()[2:], mode="bilinear") - x2_dem_1))
+        x2_1 = self.x2_x1(abs(F.interpolate(x2_dem_1, size=x1.size()[2:], mode="bilinear") - x1))
 
-        x5_4_3 = self.x5_x4_x3(abs(F.upsample(x5_4, size=x4_3.size()[2:], mode="bilinear") - x4_3))
-        x4_3_2 = self.x4_x3_x2(abs(F.upsample(x4_3, size=x3_2.size()[2:], mode="bilinear") - x3_2))
-        x3_2_1 = self.x3_x2_x1(abs(F.upsample(x3_2, size=x2_1.size()[2:], mode="bilinear") - x2_1))
+        x5_4_3 = self.x5_x4_x3(abs(F.interpolate(x5_4, size=x4_3.size()[2:], mode="bilinear") - x4_3))
+        x4_3_2 = self.x4_x3_x2(abs(F.interpolate(x4_3, size=x3_2.size()[2:], mode="bilinear") - x3_2))
+        x3_2_1 = self.x3_x2_x1(abs(F.interpolate(x3_2, size=x2_1.size()[2:], mode="bilinear") - x2_1))
 
-        x5_4_3_2 = self.x5_x4_x3_x2(abs(F.upsample(x5_4_3, size=x4_3_2.size()[2:], mode="bilinear") - x4_3_2))
-        x4_3_2_1 = self.x4_x3_x2_x1(abs(F.upsample(x4_3_2, size=x3_2_1.size()[2:], mode="bilinear") - x3_2_1))
+        x5_4_3_2 = self.x5_x4_x3_x2(abs(F.interpolate(x5_4_3, size=x4_3_2.size()[2:], mode="bilinear") - x4_3_2))
+        x4_3_2_1 = self.x4_x3_x2_x1(abs(F.interpolate(x4_3_2, size=x3_2_1.size()[2:], mode="bilinear") - x3_2_1))
 
         x5_dem_4 = self.x5_dem_4(x5_4_3_2)
         x5_4_3_2_1 = self.x5_x4_x3_x2_x1(
-            abs(F.upsample(x5_dem_4, size=x4_3_2_1.size()[2:], mode="bilinear") - x4_3_2_1)
+            abs(F.interpolate(x5_dem_4, size=x4_3_2_1.size()[2:], mode="bilinear") - x4_3_2_1)
         )
 
         level4 = x5_4
@@ -308,11 +308,11 @@ class FusNet(nn.Module):
         level1 = self.level1(x2_1 + x3_2_1 + x4_3_2_1 + x5_4_3_2_1)
 
         x5_dem_5 = self.x5_dem_5(x5)
-        output4 = self.output4(F.upsample(x5_dem_5, size=level4.size()[2:], mode="bilinear") + level4)
-        output3 = self.output3(F.upsample(output4, size=level3.size()[2:], mode="bilinear") + level3)
-        output2 = self.output2(F.upsample(output3, size=level2.size()[2:], mode="bilinear") + level2)
-        output1 = self.output1(F.upsample(output2, size=level1.size()[2:], mode="bilinear") + level1)
+        output4 = self.output4(F.interpolate(x5_dem_5, size=level4.size()[2:], mode="bilinear") + level4)
+        output3 = self.output3(F.interpolate(output4, size=level3.size()[2:], mode="bilinear") + level3)
+        output2 = self.output2(F.interpolate(output3, size=level2.size()[2:], mode="bilinear") + level2)
+        output1 = self.output1(F.interpolate(output2, size=level1.size()[2:], mode="bilinear") + level1)
 
-        output = F.upsample(output1, size=input.size()[2:], mode="bilinear")
+        output = F.interpolate(output1, size=input.size()[2:], mode="bilinear")
 
         return output
