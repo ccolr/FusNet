@@ -2,10 +2,12 @@
 heatmap.py
 ==========
 对 test.txt 中的每张图片生成 GradCAM 热力图，叠加到原图上输出为 PNG。
+支持 FusNet、DeepLabV3(+) 和 Swin-Unet 三种模型。
 
-热力图来源：对分割 logits 的「竹林类」通道求全局平均作为标量 score，
-再对 decoder 最终卷积前的特征图 (64 通道, 224×224) 做 GradCAM，
-最终双线性上采样到原图尺寸并叠加。
+GradCAM 目标层：
+  fusnet    — decoder 最后一个 DecodeBlock 的 conv（64-ch, 224×224）
+  deeplab   — classifier head 最终分类卷积前的 ReLU 层（256-ch）
+  swin_unet — 最终 Conv2d（swin_unet.output）的输入特征（96-ch, 224×224）
 
 用法示例：
     python heatmap.py \
@@ -13,6 +15,16 @@ heatmap.py
         --test_txt   test.txt \
         --data_dir   . \
         --output_dir heatmaps
+
+    python heatmap.py \
+        --model deeplab --arch deeplabv3plus_resnet50 \
+        --weights deeplab_outputs/best_model.pth \
+        --test_txt test.txt --data_dir . --output_dir heatmaps
+
+    python heatmap.py \
+        --model swin_unet \
+        --weights swinunet_outputs/best_model.pth \
+        --test_txt test.txt --data_dir . --output_dir heatmaps
 """
 
 import argparse
@@ -35,26 +47,33 @@ STD  = [37.5201 / 255, 34.2345 / 255, 30.3007 / 255]
 class GradCAM:
     """
     对指定 layer 做 GradCAM。
-    target_layer 须是 nn.Module（不含 in-place 操作的 leaf module 为佳）。
+
+    use_input=False（默认）：hook 捕获目标层的输出激活（标准 GradCAM）。
+    use_input=True：hook 捕获目标层的输入激活（用于 Swin-Unet 的最终 Conv2d，
+                   使得特征图为 96-ch 空间张量而非 2-ch logits）。
     """
 
-    def __init__(self, model: torch.nn.Module, target_layer: torch.nn.Module):
+    def __init__(self, model: torch.nn.Module, target_layer: torch.nn.Module,
+                 use_input: bool = False):
         self.model = model
+        self.use_input = use_input
         self.feature: torch.Tensor | None = None
-        self.gradient: torch.Tensor | None = None
 
-        self._fwd_hook = target_layer.register_forward_hook(self._save_feature)
-        self._bwd_hook = target_layer.register_full_backward_hook(self._save_gradient)
+        if use_input:
+            self._fwd_hook = target_layer.register_forward_pre_hook(self._save_input)
+        else:
+            self._fwd_hook = target_layer.register_forward_hook(self._save_feature)
+
+    def _save_input(self, module, input):
+        self.feature = input[0]
+        self.feature.retain_grad()
 
     def _save_feature(self, module, input, output):
-        self.feature = output.detach()
-
-    def _save_gradient(self, module, grad_input, grad_output):
-        self.gradient = grad_output[0].detach()
+        self.feature = output
+        output.retain_grad()
 
     def remove(self):
         self._fwd_hook.remove()
-        self._bwd_hook.remove()
 
     def __call__(self, tensor: torch.Tensor) -> np.ndarray:
         """
@@ -72,10 +91,11 @@ class GradCAM:
         score.backward()
 
         # GradCAM 公式：alpha = gap(gradient), cam = relu(sum_c(alpha_c * feature_c))
-        alpha   = self.gradient.mean(dim=(2, 3), keepdim=True)   # (1, C, 1, 1)
-        cam     = (alpha * self.feature).sum(dim=1, keepdim=True) # (1, 1, H', W')
-        cam     = F.relu(cam)
-        cam     = cam.squeeze().cpu().numpy()                      # (H', W')
+        gradient = self.feature.grad                                           # (1, C, H', W')
+        alpha    = gradient.mean(dim=(2, 3), keepdim=True)                    # (1, C, 1, 1)
+        cam      = (alpha * self.feature.detach()).sum(dim=1, keepdim=True)   # (1, 1, H', W')
+        cam      = F.relu(cam)
+        cam      = cam.squeeze().cpu().numpy()                     # (H', W')
 
         # 归一化
         cam_min, cam_max = cam.min(), cam.max()
@@ -86,12 +106,29 @@ class GradCAM:
         return cam.astype(np.float32)
 
 
-def get_target_layer(model):
+def get_target_layer(model, model_type: str = "fusnet",
+                     arch: str = "deeplabv3plus_resnet50"):
     """
-    返回 decoder 最后一个 DecodeBlock 中的 conv Sequential 作为目标层。
-    这一层输出 (B, 64, 224, 224)，空间信息最丰富。
+    返回 (target_layer, use_input) 元组供 GradCAM 使用。
+
+    fusnet    : decoder[-1].conv — (B, 64, 224, 224) 输出激活
+    deeplab   : classifier.classifier[-2] — 最终分类卷积前的 ReLU，(B, 256, H', W')
+    swin_unet : swin_unet.output (Conv2d) 的输入 — (B, 96, 224, 224)
     """
-    return model.decoder[-1].conv
+    if model_type == "fusnet":
+        return model.decoder[-1].conv, False
+    elif model_type == "deeplab":
+        # 对 DeepLabHead 和 DeepLabHeadV3Plus 都适用：
+        #   Sequential 中 [-2] 是最后一个 ReLU，[-1] 是最终 1×1 Conv。
+        return model.model.classifier.classifier[-2], False
+    elif model_type == "swin_unet":
+        # 捕获送入最终 Conv2d 之前的 96-ch 空间特征图
+        return model.swin_unet.output, True
+    else:
+        raise ValueError(
+            f"Unknown model type: {model_type!r}. "
+            "Choose from: fusnet, deeplab, swin_unet"
+        )
 
 
 # ── 图像 I/O ────────────────────────────────────────────────────────────────
@@ -141,8 +178,47 @@ def apply_heatmap(image: np.ndarray, cam: np.ndarray,
 
 # ── 主程序 ───────────────────────────────────────────────────────────────────
 
+def _resolve_deeplab_arch(state: dict, user_arch: str) -> str:
+    """根据 checkpoint 的 key 自动判断 V3 还是 V3+，backbone 沿用 user_arch 中的部分。"""
+    is_plus = any(k.startswith("model.classifier.project.") for k in state)
+    if user_arch.startswith("deeplabv3plus_"):
+        backbone = user_arch[len("deeplabv3plus_"):]
+    elif user_arch.startswith("deeplabv3_"):
+        backbone = user_arch[len("deeplabv3_"):]
+    else:
+        backbone = "resnet50"
+    resolved = f"{'deeplabv3plus' if is_plus else 'deeplabv3'}_{backbone}"
+    if resolved != user_arch:
+        print(f"[INFO] DeepLab arch auto-corrected: {user_arch!r} → {resolved!r}")
+    return resolved
+
+
+def load_model(weights_path: str, device: torch.device,
+               model_type: str = "fusnet",
+               arch: str = "deeplabv3plus_resnet50"):
+    state = torch.load(weights_path, map_location=device)
+    if model_type == "fusnet":
+        from model.FusNet import FusNet
+        model = FusNet()
+    elif model_type == "deeplab":
+        arch = _resolve_deeplab_arch(state, arch)
+        from model.deeplabv3_seg import DeepLabV3Seg
+        model = DeepLabV3Seg(arch=arch, pretrained_backbone=False)
+    elif model_type == "swin_unet":
+        from model.swin_unet_seg import SwinUnetSeg
+        model = SwinUnetSeg()
+    else:
+        raise ValueError(
+            f"Unknown model type: {model_type!r}. "
+            "Choose from: fusnet, deeplab, swin_unet"
+        )
+    model.load_state_dict(state)
+    model.to(device).eval()
+    return model
+
+
 def main():
-    parser = argparse.ArgumentParser(description="FusNet GradCAM Heatmap")
+    parser = argparse.ArgumentParser(description="GradCAM Heatmap")
     parser.add_argument("--weights",    type=str, required=True,
                         help="模型权重路径")
     parser.add_argument("--test_txt",   type=str, required=True,
@@ -155,22 +231,23 @@ def main():
                         help="模型输入分辨率（默认 224）")
     parser.add_argument("--alpha",      type=float, default=0.5,
                         help="热力图叠加透明度（默认 0.5）")
+    parser.add_argument("--model",      type=str, default="fusnet",
+                        choices=["fusnet", "deeplab", "swin_unet"],
+                        help="模型类型（默认 fusnet）")
+    parser.add_argument("--arch",       type=str, default="deeplabv3plus_resnet50",
+                        help="DeepLab 架构变体，仅当 --model deeplab 时有效")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    from model.FusNet import FusNet
-    model = FusNet()
-    state = torch.load(args.weights, map_location=device)
-    model.load_state_dict(state)
-    model.to(device)
-    # 注意：GradCAM 需要梯度，不能 model.eval() + torch.no_grad()
-    model.eval()
+    # GradCAM 需要梯度，不能套 torch.no_grad()，eval() 仍需保留以固定 BN/Dropout
+    model = load_model(args.weights, device, args.model, args.arch)
+    print(f"Loaded weights: {args.weights}  (model={args.model})")
 
-    target_layer = get_target_layer(model)
-    gradcam = GradCAM(model, target_layer)
+    target_layer, use_input = get_target_layer(model, args.model, args.arch)
+    gradcam = GradCAM(model, target_layer, use_input=use_input)
 
     with open(args.test_txt, "r", encoding="utf-8") as f:
         rel_paths = [l.strip() for l in f if l.strip()]

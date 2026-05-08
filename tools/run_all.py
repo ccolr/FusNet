@@ -69,6 +69,14 @@ def main():
     parser.add_argument("--output_root", type=str, default="results",
                         help="所有输出的根目录")
 
+    # ── 模型选择 ─────────────────────────────────────────────────────────────
+    parser.add_argument("--model",       type=str, default="fusnet",
+                        choices=["fusnet", "deeplab", "swin_unet"],
+                        help="模型类型（默认 fusnet）")
+    parser.add_argument("--arch",        type=str, default="deeplabv3plus_resnet50",
+                        help="DeepLab 架构变体，仅当 --model deeplab 时有效，"
+                             "如 deeplabv3plus_resnet50 / deeplabv3_resnet101 等")
+
     # ── 细粒度覆盖 ───────────────────────────────────────────────────────────
     parser.add_argument("--pred_dir",    type=str, default=None,
                         help="预测 mask 目录（默认 output_root/masks）；"
@@ -122,12 +130,14 @@ def main():
             "--data_dir",   args.data_dir,
             "--output_dir", mask_dir,
             "--input_size", str(args.input_size),
+            "--model",      args.model,
+            "--arch",       args.arch,
         ]
         codes["predict"] = run(cmd, "Predict masks")
     else:
         print("\n[SKIP] predict step")
 
-    # ── Step 2: Compare ──────────────────────────────────────────────────────
+    # ── Step 2: Heatmap ──────────────────────────────────────────────────────
     if not args.skip_heatmap:
         cmd = [
             python, heatmap_py,
@@ -137,6 +147,8 @@ def main():
             "--output_dir", hmap_dir,
             "--input_size", str(args.input_size),
             "--alpha",      str(args.alpha),
+            "--model",      args.model,
+            "--arch",       args.arch,
         ]
         codes["heatmap"] = run(cmd, "Generate heatmaps")
     else:
