@@ -322,7 +322,7 @@ def evaluate_confusion_matrix(model, loader, device):
 
 def main():
     parser = argparse.ArgumentParser(description="Train FusNet_legacy_4 for bamboo binary segmentation")
-    parser.add_argument("--batch_size", type=int, default=8, help="Batch size")
+    parser.add_argument("--batch_size", type=int, default=24, help="Batch size")
     parser.add_argument("--epochs", type=int, default=120, help="Training epochs")
     parser.add_argument("--data_dir", type=str, default=".", help="Data root directory")
     args = parser.parse_args()
