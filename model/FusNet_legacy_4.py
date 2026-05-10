@@ -1,3 +1,5 @@
+# iAFF之后传入下一层, 跳跃连接是三路融合
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
