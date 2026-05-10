@@ -111,12 +111,17 @@ def get_target_layer(model, model_type: str = "fusnet",
     """
     返回 (target_layer, use_input) 元组供 GradCAM 使用。
 
-    fusnet    : decoder[-1].conv — (B, 64, 224, 224) 输出激活
-    deeplab   : classifier.classifier[-2] — 最终分类卷积前的 ReLU，(B, 256, H', W')
-    swin_unet : swin_unet.output (Conv2d) 的输入 — (B, 96, 224, 224)
+    fusnet             : decoder[-1].conv — (B, 64, 224, 224)
+    fusnet_legacy_1    : output2 Sequential — (B, 64, 56, 56)，最终 output1 的上一级
+    fusnet_legacy_2/3/4: decoder[-1].conv — (B, 64, 224, 224)，与 fusnet 相同
+    deeplab            : classifier.classifier[-2] — ReLU，(B, 256, H', W')
+    swin_unet          : swin_unet.output (Conv2d) 的输入 — (B, 96, 224, 224)
     """
-    if model_type == "fusnet":
+    if model_type in ("fusnet", "fusnet_legacy_2", "fusnet_legacy_3", "fusnet_legacy_4"):
         return model.decoder[-1].conv, False
+    elif model_type == "fusnet_legacy_1":
+        # legacy_1 使用平铺式解码器，output2 是送入 output1 之前的最后一个 64-ch Sequential
+        return model.output2, False
     elif model_type == "deeplab":
         # 对 DeepLabHead 和 DeepLabHeadV3Plus 都适用：
         #   Sequential 中 [-2] 是最后一个 ReLU，[-1] 是最终 1×1 Conv。
@@ -127,7 +132,7 @@ def get_target_layer(model, model_type: str = "fusnet",
     else:
         raise ValueError(
             f"Unknown model type: {model_type!r}. "
-            "Choose from: fusnet, deeplab, swin_unet"
+            "Choose from: fusnet, fusnet_legacy_1/2/3/4, deeplab, swin_unet"
         )
 
 
@@ -200,6 +205,18 @@ def load_model(weights_path: str, device: torch.device,
     if model_type == "fusnet":
         from model.FusNet import FusNet
         model = FusNet()
+    elif model_type == "fusnet_legacy_1":
+        from model.FusNet_legacy_1 import FusNet
+        model = FusNet(outchannel=2)
+    elif model_type == "fusnet_legacy_2":
+        from model.FusNet_legacy_2 import FusNet
+        model = FusNet()
+    elif model_type == "fusnet_legacy_3":
+        from model.FusNet_legacy_3 import FusNet
+        model = FusNet()
+    elif model_type == "fusnet_legacy_4":
+        from model.FusNet_legacy_4 import FusNet
+        model = FusNet()
     elif model_type == "deeplab":
         arch = _resolve_deeplab_arch(state, arch)
         from model.deeplabv3_seg import DeepLabV3Seg
@@ -210,7 +227,7 @@ def load_model(weights_path: str, device: torch.device,
     else:
         raise ValueError(
             f"Unknown model type: {model_type!r}. "
-            "Choose from: fusnet, deeplab, swin_unet"
+            "Choose from: fusnet, fusnet_legacy_1/2/3/4, deeplab, swin_unet"
         )
     model.load_state_dict(state)
     model.to(device).eval()
@@ -232,7 +249,9 @@ def main():
     parser.add_argument("--alpha",      type=float, default=0.5,
                         help="热力图叠加透明度（默认 0.5）")
     parser.add_argument("--model",      type=str, default="fusnet",
-                        choices=["fusnet", "deeplab", "swin_unet"],
+                        choices=["fusnet", "fusnet_legacy_1", "fusnet_legacy_2",
+                                 "fusnet_legacy_3", "fusnet_legacy_4",
+                                 "deeplab", "swin_unet"],
                         help="模型类型（默认 fusnet）")
     parser.add_argument("--arch",       type=str, default="deeplabv3plus_resnet50",
                         help="DeepLab 架构变体，仅当 --model deeplab 时有效")

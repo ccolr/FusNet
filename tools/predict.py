@@ -62,6 +62,18 @@ def load_model(weights_path: str, device: torch.device,
     if model_type == "fusnet":
         from model.FusNet import FusNet
         model = FusNet()
+    elif model_type == "fusnet_legacy_1":
+        from model.FusNet_legacy_1 import FusNet
+        model = FusNet(outchannel=2)
+    elif model_type == "fusnet_legacy_2":
+        from model.FusNet_legacy_2 import FusNet
+        model = FusNet()
+    elif model_type == "fusnet_legacy_3":
+        from model.FusNet_legacy_3 import FusNet
+        model = FusNet()
+    elif model_type == "fusnet_legacy_4":
+        from model.FusNet_legacy_4 import FusNet
+        model = FusNet()
     elif model_type == "deeplab":
         arch = _resolve_deeplab_arch(state, arch)
         from model.deeplabv3_seg import DeepLabV3Seg
@@ -72,7 +84,7 @@ def load_model(weights_path: str, device: torch.device,
     else:
         raise ValueError(
             f"Unknown model type: {model_type!r}. "
-            "Choose from: fusnet, deeplab, swin_unet"
+            "Choose from: fusnet, fusnet_legacy_1/2/3/4, deeplab, swin_unet"
         )
     model.load_state_dict(state)
     model.to(device).eval()
@@ -135,7 +147,9 @@ def main():
     parser.add_argument("--input_size", type=int, default=224,
                         help="模型输入分辨率（默认 224）")
     parser.add_argument("--model",      type=str, default="fusnet",
-                        choices=["fusnet", "deeplab", "swin_unet"],
+                        choices=["fusnet", "fusnet_legacy_1", "fusnet_legacy_2",
+                                 "fusnet_legacy_3", "fusnet_legacy_4",
+                                 "deeplab", "swin_unet"],
                         help="模型类型（默认 fusnet）")
     parser.add_argument("--arch",       type=str, default="deeplabv3plus_resnet50",
                         help="DeepLab 架构变体，仅当 --model deeplab 时有效，"

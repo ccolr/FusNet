@@ -71,7 +71,9 @@ def main():
 
     # ── 模型选择 ─────────────────────────────────────────────────────────────
     parser.add_argument("--model",       type=str, default="fusnet",
-                        choices=["fusnet", "deeplab", "swin_unet"],
+                        choices=["fusnet", "fusnet_legacy_1", "fusnet_legacy_2",
+                                 "fusnet_legacy_3", "fusnet_legacy_4",
+                                 "deeplab", "swin_unet"],
                         help="模型类型（默认 fusnet）")
     parser.add_argument("--arch",        type=str, default="deeplabv3plus_resnet50",
                         help="DeepLab 架构变体，仅当 --model deeplab 时有效，"
