@@ -125,8 +125,8 @@ class BambooDataset(Dataset):
         img_path, mask_path = self.samples[idx]
 
         with rasterio.open(img_path) as src:
-            image = src.read()  # (C, H, W)
-        image = np.moveaxis(image, 0, -1).astype(np.uint8)  # (H, W, C)
+            image = src.read()
+        image = np.moveaxis(image, 0, -1).astype(np.uint8)
         if image.shape[2] > 3:
             image = image[:, :, :3]
 
@@ -150,10 +150,8 @@ class DiceLoss(nn.Module):
     def forward(self, logits: torch.Tensor, targets: torch.Tensor):
         probs = torch.sigmoid(logits)
         targets = targets.float()
-
         probs = probs.contiguous().view(probs.size(0), -1)
         targets = targets.contiguous().view(targets.size(0), -1)
-
         intersection = (probs * targets).sum(dim=1)
         dice = (2.0 * intersection + self.smooth) / (probs.sum(dim=1) + targets.sum(dim=1) + self.smooth)
         return 1.0 - dice.mean()
@@ -185,8 +183,8 @@ def metrics_from_confusion(tp, tn, fp, fn):
     recall     = tp / (tp + fn + eps)
     precision  = tp / (tp + fp + eps)
     f1         = 2.0 * precision * recall / (precision + recall + eps)
-    iou_bamboo = tp / (tp + fp + fn + eps)   # 竹林类 IoU
-    iou_bg     = tn / (tn + fp + fn + eps)   # 背景类 IoU
+    iou_bamboo = tp / (tp + fp + fn + eps)
+    iou_bg     = tn / (tn + fp + fn + eps)
     miou       = (iou_bamboo + iou_bg) / 2.0
     return {"acc": accuracy, "recall": recall, "f1": f1,
             "iou_bamboo": iou_bamboo, "miou": miou}
@@ -229,11 +227,8 @@ def plot_confusion_matrix(cm: np.ndarray, class_names, save_path):
         for j in range(cm.shape[1]):
             txt = f"{cm[i, j]}\n({cm_norm[i, j] * 100:.1f}%)"
             ax.text(
-                j,
-                i,
-                txt,
-                ha="center",
-                va="center",
+                j, i, txt,
+                ha="center", va="center",
                 color="white" if cm[i, j] > thresh else "black",
                 fontsize=10,
             )
@@ -244,7 +239,7 @@ def plot_confusion_matrix(cm: np.ndarray, class_names, save_path):
 
 
 def run_epoch(model, loader, device, train_mode, amp_enabled,
-                bce_loss=None, dice_loss=None, optimizer=None, scaler=None):
+              bce_loss=None, dice_loss=None, optimizer=None, scaler=None):
     if train_mode:
         model.train()
     else:
@@ -296,6 +291,7 @@ def run_epoch(model, loader, device, train_mode, amp_enabled,
     metrics = metrics_from_confusion(tp_total, tn_total, fp_total, fn_total)
     return avg_loss, metrics
 
+
 def evaluate_confusion_matrix(model, loader, device):
     model.eval()
     tp_total, tn_total, fp_total, fn_total = 0, 0, 0, 0
@@ -320,34 +316,28 @@ def evaluate_confusion_matrix(model, loader, device):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train FusNet for bamboo binary segmentation")
-    parser.add_argument("--batch_size", type=int, default=24, help="Batch size")
-    parser.add_argument("--epochs", type=int, default=120, help="Training epochs")
-    # parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
-    parser.add_argument("--data_dir", type=str, default=".", help="Data root directory")
+    parser = argparse.ArgumentParser(description="Train Res2Net baseline for bamboo binary segmentation")
+    parser.add_argument("--batch_size", type=int, default=24)
+    parser.add_argument("--epochs", type=int, default=120)
+    parser.add_argument("--data_dir", type=str, default=".")
     args = parser.parse_args()
 
     set_seed(42)
 
-    try:
-        from model.FusNet import FusNet
-    except ModuleNotFoundError as exc:
-        raise ModuleNotFoundError(
-            "Import FusNet failed. Please ensure required dependencies are installed (for example `mamba_ssm`)."
-        ) from exc
+    from model.res2net_seg import Res2NetSeg
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     amp_enabled = device.type == "cuda"
     num_workers = min(8, os.cpu_count() if os.cpu_count() is not None else 2)
 
-    output_dir = os.path.join("fusnet_outputs")
+    output_dir = "res2net_outputs"
     os.makedirs(output_dir, exist_ok=True)
-    log_path = os.path.join(output_dir, "log.txt")
-    best_weight_path = os.path.join(output_dir, "best_model.pth")
-    last_weight_path = os.path.join(output_dir, "last_model.pth")
-    loss_curve_path = os.path.join(output_dir, "loss_curve.png")
-    acc_curve_path = os.path.join(output_dir, "accuracy_curve.png")
-    cm_path = os.path.join(output_dir, "confusion_matrix.png")
+    log_path          = os.path.join(output_dir, "log.txt")
+    best_weight_path  = os.path.join(output_dir, "best_model.pth")
+    last_weight_path  = os.path.join(output_dir, "last_model.pth")
+    loss_curve_path   = os.path.join(output_dir, "loss_curve.png")
+    acc_curve_path    = os.path.join(output_dir, "accuracy_curve.png")
+    cm_path           = os.path.join(output_dir, "confusion_matrix.png")
 
     train_dataset = BambooDataset(
         data_dir=args.data_dir,
@@ -381,28 +371,30 @@ def main():
         drop_last=False,
     )
 
-    model = FusNet().to(device)
+    model = Res2NetSeg(num_classes=2, pretrained=True).to(device)
+
+    # pretrained encoder uses small lr; lateral projections + decoder + head use large lr
+    new_params = (
+        list(model.lat1.parameters())
+        + list(model.lat2.parameters())
+        + list(model.lat3.parameters())
+        + list(model.lat4.parameters())
+        + list(model.decoder.parameters())
+        + list(model.seg_head.parameters())
+    )
     optimizer = torch.optim.AdamW([
-        {"params": model.resnet.parameters(),  "lr": 1e-5},  # 预训练backbone用小lr
-        {"params": model.swin.parameters(),    "lr": 1e-5},
-        {"params": model.mamba.parameters(),   "lr": 1e-5},
-        {"params": model.hca_stages.parameters(), "lr": 1e-4},  # 新模块用大lr
-        {"params": model.decoder.parameters(), "lr": 1e-4},
-        {"params": model.seg_head.parameters(),"lr": 1e-4},
+        {"params": model.encoder.parameters(), "lr": 1e-5},
+        {"params": new_params,                 "lr": 1e-4},
     ], weight_decay=1e-4)
-    warmup = LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=5)
-    cosine = CosineAnnealingLR(optimizer, T_max=args.epochs - 5, eta_min=1e-6)
+
+    warmup  = LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=5)
+    cosine  = CosineAnnealingLR(optimizer, T_max=args.epochs - 5, eta_min=1e-6)
     scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[5])
-    scaler = torch.amp.GradScaler(device="cuda", enabled=amp_enabled)
-    bce_loss = nn.BCEWithLogitsLoss()
+    scaler  = torch.amp.GradScaler(device="cuda", enabled=amp_enabled)
+    bce_loss  = nn.BCEWithLogitsLoss()
     dice_loss = DiceLoss()
 
-    history = {
-        "train_loss": [],
-        "val_loss": [],
-        "train_acc": [],
-        "val_acc": [],
-    }
+    history = {"train_loss": [], "val_loss": [], "train_acc": [], "val_acc": []}
     best_f1 = -1.0
     best_epoch = -1
 
@@ -416,25 +408,14 @@ def main():
 
     for epoch in range(1, args.epochs + 1):
         train_loss, train_metrics = run_epoch(
-            model=model,
-            loader=train_loader,
-            optimizer=optimizer,
-            scaler=scaler,
-            bce_loss=bce_loss,
-            dice_loss=dice_loss,
-            device=device,
-            train_mode=True,
-            amp_enabled=amp_enabled,
+            model=model, loader=train_loader, optimizer=optimizer, scaler=scaler,
+            bce_loss=bce_loss, dice_loss=dice_loss, device=device,
+            train_mode=True, amp_enabled=amp_enabled,
         )
-
         val_loss, val_metrics = run_epoch(
-            model=model,
-            loader=valid_loader,
-            bce_loss=bce_loss,
-            dice_loss=dice_loss,
-            device=device,
-            train_mode=False,
-            amp_enabled=amp_enabled,
+            model=model, loader=valid_loader,
+            bce_loss=bce_loss, dice_loss=dice_loss, device=device,
+            train_mode=False, amp_enabled=amp_enabled,
         )
 
         current_lr = optimizer.param_groups[0]["lr"]
@@ -466,20 +447,10 @@ def main():
             f"F1={val_metrics['f1']:.4f}, Recall={val_metrics['recall']:.4f}"
         )
 
-        plot_curve(
-            train_values=history["train_loss"],
-            val_values=history["val_loss"],
-            ylabel="Loss",
-            title="Training and Validation Loss",
-            save_path=loss_curve_path,
-        )
-        plot_curve(
-            train_values=history["train_acc"],
-            val_values=history["val_acc"],
-            ylabel="Accuracy",
-            title="Training and Validation Accuracy",
-            save_path=acc_curve_path,
-        )
+        plot_curve(history["train_loss"], history["val_loss"],
+                   "Loss", "Training and Validation Loss", loss_curve_path)
+        plot_curve(history["train_acc"], history["val_acc"],
+                   "Accuracy", "Training and Validation Accuracy", acc_curve_path)
 
         torch.save(model.state_dict(), last_weight_path)
         if val_metrics["f1"] > best_f1:
@@ -490,20 +461,19 @@ def main():
     print(f"Best validation F1: {best_f1:.4f} at epoch {best_epoch}")
 
     if os.path.exists(best_weight_path):
-        state_dict = torch.load(best_weight_path, map_location=device)
-        model.load_state_dict(state_dict)
+        model.load_state_dict(torch.load(best_weight_path, map_location=device))
 
     cm = evaluate_confusion_matrix(model, valid_loader, device)
     plot_confusion_matrix(cm, CLASS_NAMES, cm_path)
 
     print("Training complete.")
     print(f"Outputs saved to: {output_dir}")
-    print(f"Log file: {log_path}")
-    print(f"Best weight: {best_weight_path}")
-    print(f"Last weight: {last_weight_path}")
-    print(f"Loss curve: {loss_curve_path}")
-    print(f"Accuracy curve: {acc_curve_path}")
-    print(f"Confusion matrix: {cm_path}")
+    print(f"Log:          {log_path}")
+    print(f"Best weight:  {best_weight_path}")
+    print(f"Last weight:  {last_weight_path}")
+    print(f"Loss curve:   {loss_curve_path}")
+    print(f"Acc curve:    {acc_curve_path}")
+    print(f"Confusion:    {cm_path}")
 
 
 if __name__ == "__main__":
