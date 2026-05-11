@@ -11,11 +11,18 @@ predict.py
         --data_dir . \
         --output_dir predictions/masks
 
-    # DeepLabV3+
+    # DeepLabV3（deeplabv3_seg.py）
     python predict.py \
-        --model deeplab \
-        --arch  deeplabv3plus_resnet50 \
+        --model deeplabv3 \
+        --arch  deeplabv3_resnet50 \
         --weights deeplab_outputs/best_model.pth \
+        --test_txt test.txt --data_dir . --output_dir predictions/masks
+
+    # DeepLabV3+（deeplabv3plus_seg.py）
+    python predict.py \
+        --model deeplabv3plus \
+        --arch  deeplabv3plus_resnet50 \
+        --weights deeplabv3plus_outputs/best_model.pth \
         --test_txt test.txt --data_dir . --output_dir predictions/masks
 
     # Swin-Unet
@@ -74,7 +81,19 @@ def load_model(weights_path: str, device: torch.device,
     elif model_type == "fusnet_legacy_4":
         from model.FusNet_legacy_4 import FusNet
         model = FusNet()
-    elif model_type == "deeplab":
+    elif model_type == "fusnet_legacy_5":
+        from model.FusNet_legacy_5 import FusNet
+        model = FusNet()
+    elif model_type == "fusnet_baseline_add":
+        from model.FusNet_baseline import FusNetBaseline
+        model = FusNetBaseline(fusion_mode="add")
+    elif model_type == "fusnet_baseline_cat":
+        from model.FusNet_baseline import FusNetBaseline
+        model = FusNetBaseline(fusion_mode="cat")
+    elif model_type == "deeplabv3plus":
+        from model.deeplabv3plus_seg import DeepLabV3PlusSeg
+        model = DeepLabV3PlusSeg(arch=arch, pretrained_backbone=False)
+    elif model_type == "deeplabv3":
         arch = _resolve_deeplab_arch(state, arch)
         from model.deeplabv3_seg import DeepLabV3Seg
         model = DeepLabV3Seg(arch=arch, pretrained_backbone=False)
@@ -84,7 +103,9 @@ def load_model(weights_path: str, device: torch.device,
     else:
         raise ValueError(
             f"Unknown model type: {model_type!r}. "
-            "Choose from: fusnet, fusnet_legacy_1/2/3/4, deeplab, swin_unet"
+            "Choose from: fusnet, fusnet_legacy_1/2/3/4/5, "
+            "fusnet_baseline_add, fusnet_baseline_cat, "
+            "deeplabv3plus, deeplabv3, swin_unet"
         )
     model.load_state_dict(state)
     model.to(device).eval()
@@ -103,10 +124,6 @@ def read_image(img_path: str) -> np.ndarray:
 
 def preprocess(image: np.ndarray, size: int = 224) -> torch.Tensor:
     """归一化并 resize 为模型输入 tensor (1, 3, H, W)。"""
-    h, w = image.shape[:2]
-    img_f = image.astype(np.float32) / 255.0           # [0,1]
-
-    # resize
     pil = Image.fromarray(image).resize((size, size), Image.BILINEAR)
     img_f = np.array(pil).astype(np.float32) / 255.0
 
@@ -148,12 +165,13 @@ def main():
                         help="模型输入分辨率（默认 224）")
     parser.add_argument("--model",      type=str, default="fusnet",
                         choices=["fusnet", "fusnet_legacy_1", "fusnet_legacy_2",
-                                 "fusnet_legacy_3", "fusnet_legacy_4",
-                                 "deeplab", "swin_unet"],
+                                 "fusnet_legacy_3", "fusnet_legacy_4", "fusnet_legacy_5",
+                                 "fusnet_baseline_add", "fusnet_baseline_cat",
+                                 "deeplabv3plus", "deeplabv3", "swin_unet"],
                         help="模型类型（默认 fusnet）")
     parser.add_argument("--arch",       type=str, default="deeplabv3plus_resnet50",
-                        help="DeepLab 架构变体，仅当 --model deeplab 时有效，"
-                             "如 deeplabv3plus_resnet50 / deeplabv3_resnet101 等")
+                        help="架构变体，仅当 --model deeplabv3 / deeplabv3plus 时有效，"
+                             "如 deeplabv3_resnet50 / deeplabv3plus_resnet101 等")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)

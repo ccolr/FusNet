@@ -72,12 +72,13 @@ def main():
     # ── 模型选择 ─────────────────────────────────────────────────────────────
     parser.add_argument("--model",       type=str, default="fusnet",
                         choices=["fusnet", "fusnet_legacy_1", "fusnet_legacy_2",
-                                 "fusnet_legacy_3", "fusnet_legacy_4",
-                                 "deeplab", "swin_unet"],
+                                 "fusnet_legacy_3", "fusnet_legacy_4", "fusnet_legacy_5",
+                                 "fusnet_baseline_add", "fusnet_baseline_cat",
+                                 "deeplabv3plus", "deeplabv3", "swin_unet"],
                         help="模型类型（默认 fusnet）")
     parser.add_argument("--arch",        type=str, default="deeplabv3plus_resnet50",
-                        help="DeepLab 架构变体，仅当 --model deeplab 时有效，"
-                             "如 deeplabv3plus_resnet50 / deeplabv3_resnet101 等")
+                        help="架构变体，仅当 --model deeplabv3 / deeplabv3plus 时有效，"
+                             "如 deeplabv3_resnet50 / deeplabv3plus_resnet101 等")
 
     # ── 细粒度覆盖 ───────────────────────────────────────────────────────────
     parser.add_argument("--pred_dir",    type=str, default=None,
@@ -156,7 +157,7 @@ def main():
     else:
         print("\n[SKIP] heatmap step")
 
-    # ── Step 3: Heatmap ──────────────────────────────────────────────────────
+    # ── Step 3: Compare ──────────────────────────────────────────────────────
     if not args.skip_compare:
         cmd = [
             python, compare_py,
