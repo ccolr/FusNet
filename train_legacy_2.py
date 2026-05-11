@@ -20,7 +20,7 @@ from torch.utils.data import DataLoader, Dataset
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
 MEAN = [55.7578, 67.4502, 58.6568]
-STD = [55.7578, 67.4502, 58.6568]
+STD = [37.5201, 34.2345, 30.3007]
 CLASS_NAMES = ["Non-Bamboo", "Bamboo"]
 
 

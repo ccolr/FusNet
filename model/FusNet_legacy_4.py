@@ -145,6 +145,10 @@ class FusNet(nn.Module):
             ]
         )
 
+        # ── 跳跃连接融合后的归一化 ──────────────────────────────
+        self.skip_norm_14 = nn.Sequential(nn.BatchNorm2d(dim_feat), nn.ReLU(inplace=True))
+        self.skip_norm_28 = nn.Sequential(nn.BatchNorm2d(dim_feat), nn.ReLU(inplace=True))
+
         # ── 分割输出头 ──────────────────────────────────────────
         self.seg_head = nn.Conv2d(64, num_classes, kernel_size=1)
 
@@ -211,8 +215,8 @@ class FusNet(nn.Module):
             mamba_feat = mamba_enh
 
         # ── 5. 跳跃连接 ────────────────────────────────────────────
-        skip_14 = self.skip_proj[0](res_f2) + fused[1]
-        skip_28 = self.skip_proj[1](res_f1) + fused[0]
+        skip_14 = self.skip_norm_14(self.skip_proj[0](res_f2) + fused[1])
+        skip_28 = self.skip_norm_28(self.skip_proj[1](res_f1) + fused[0])
         skip_56 = res_f0
 
         # ── 6. FPN式解码器 ──────────────────────────────────────────
