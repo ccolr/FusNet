@@ -100,12 +100,22 @@ def load_model(weights_path: str, device: torch.device,
     elif model_type == "swin_unet":
         from model.swin_unet_seg import SwinUnetSeg
         model = SwinUnetSeg()
+    elif model_type == "res2net_seg":
+        from model.res2net_seg import Res2NetSeg
+        model = Res2NetSeg(pretrained=False)
+    elif model_type == "swin_seg":
+        from model.swin_seg import SwinSeg
+        model = SwinSeg(pretrained=False)
+    elif model_type == "mambavision_seg":
+        from model.mambavision_seg import MambaVisionSeg
+        model = MambaVisionSeg(pretrained=False)
     else:
         raise ValueError(
             f"Unknown model type: {model_type!r}. "
             "Choose from: fusnet, fusnet_legacy_1/2/3/4/5, "
             "fusnet_baseline_add, fusnet_baseline_cat, "
-            "deeplabv3plus, deeplabv3, swin_unet"
+            "deeplabv3plus, deeplabv3, swin_unet, "
+            "res2net_seg, swin_seg, mambavision_seg"
         )
     model.load_state_dict(state)
     model.to(device).eval()
@@ -167,7 +177,8 @@ def main():
                         choices=["fusnet", "fusnet_legacy_1", "fusnet_legacy_2",
                                  "fusnet_legacy_3", "fusnet_legacy_4", "fusnet_legacy_5",
                                  "fusnet_baseline_add", "fusnet_baseline_cat",
-                                 "deeplabv3plus", "deeplabv3", "swin_unet"],
+                                 "deeplabv3plus", "deeplabv3", "swin_unet",
+                                 "res2net_seg", "swin_seg", "mambavision_seg"],
                         help="模型类型（默认 fusnet）")
     parser.add_argument("--arch",       type=str, default="deeplabv3plus_resnet50",
                         help="架构变体，仅当 --model deeplabv3 / deeplabv3plus 时有效，"
