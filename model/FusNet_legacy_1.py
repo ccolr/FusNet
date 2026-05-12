@@ -11,42 +11,42 @@ from model.swin import swin_tiny_patch4_window7_224
 from model.AFFUtils import iAFF, AFF, MS_CAM
 
 
-class RGBChannelAttention(nn.Module):
-    """
-    对 RGB 三个通道分别加权增强，使网络对绿色区域更加敏感。
-    """
+# class RGBChannelAttention(nn.Module):
+#     """
+#     对 RGB 三个通道分别加权增强，使网络对绿色区域更加敏感。
+#     """
+#
+#     def __init__(self, channels, reduction=16):
+#         super().__init__()
+#         self.avg_pool = nn.AdaptiveAvgPool2d(1)  # 全局平均池化
+#         self.fc = nn.Sequential(
+#             nn.Linear(channels, channels // reduction, bias=False),
+#             nn.ReLU(inplace=True),
+#             nn.Linear(channels // reduction, channels, bias=False),
+#             nn.Sigmoid(),
+#         )
+#
+#     def forward(self, x):
+#         b, c, _, _ = x.size()
+#         y = self.avg_pool(x).view(b, c)
+#         y = self.fc(y).view(b, c, 1, 1)
+#         return x * y  # 每个通道按权重放大或缩小
 
-    def __init__(self, channels, reduction=16):
-        super().__init__()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)  # 全局平均池化
-        self.fc = nn.Sequential(
-            nn.Linear(channels, channels // reduction, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Linear(channels // reduction, channels, bias=False),
-            nn.Sigmoid(),
-        )
 
-    def forward(self, x):
-        b, c, _, _ = x.size()
-        y = self.avg_pool(x).view(b, c)
-        y = self.fc(y).view(b, c, 1, 1)
-        return x * y  # 每个通道按权重放大或缩小
-
-
-class TextureConv(nn.Module):
-    """
-    增强局部纹理特征，对竹叶颗粒感敏感。
-    """
-
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False)
-        nn.init.kaiming_normal_(self.conv.weight)
-        self.bn = nn.BatchNorm2d(out_channels)
-        self.relu = nn.ReLU(inplace=True)
-
-    def forward(self, x):
-        return self.relu(self.bn(self.conv(x)))
+# class TextureConv(nn.Module):
+#     """
+#     增强局部纹理特征，对竹叶颗粒感敏感。
+#     """
+#
+#     def __init__(self, in_channels, out_channels):
+#         super().__init__()
+#         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False)
+#         nn.init.kaiming_normal_(self.conv.weight)
+#         self.bn = nn.BatchNorm2d(out_channels)
+#         self.relu = nn.ReLU(inplace=True)
+#
+#     def forward(self, x):
+#         return self.relu(self.bn(self.conv(x)))
 
 
 class FusNet(nn.Module):
@@ -57,8 +57,8 @@ class FusNet(nn.Module):
         # ---- ResNet Backbone ----
         self.resnet = res2net50_v1b_26w_4s(pretrained=True)  # 使用预训练的res2net作为特征提取网络
 
-        self.rgb_channel_attention = RGBChannelAttention(64)  # RGB通道注意力模块
-        self.texture_conv = TextureConv(64, 64)  # 纹理增强卷积模块
+        # self.rgb_channel_attention = RGBChannelAttention(64)  # RGB通道注意力模块
+        # self.texture_conv = TextureConv(64, 64)  # 纹理增强卷积模块
 
         # ---- Swin Transformer Backbone ----
         self.swin = swin_tiny_patch4_window7_224(pretrained=True)  # 使用预训练的swin transformer作为特征提取网络
@@ -71,7 +71,7 @@ class FusNet(nn.Module):
 
         # ---- 特征融合层 ----
         self.fuse1 = nn.Conv2d(
-            in_channels=640, out_channels=256, kernel_size=1, stride=1, padding=0
+            in_channels=448, out_channels=256, kernel_size=1, stride=1, padding=0
         )  # 融合resnet, swin, mamba的输出
         self.fuse2 = nn.Conv2d(in_channels=896, out_channels=512, kernel_size=1, stride=1, padding=0)
         self.fuse3 = nn.Conv2d(in_channels=1792, out_channels=1024, kernel_size=1, stride=1, padding=0)
@@ -225,14 +225,13 @@ class FusNet(nn.Module):
 
         x1 = self.resnet.maxpool(x)  # shape[1, 64, 56, 56]
 
-        # ---- 插入 RGB + Texture 模块 ----
-        x1_rgb_att = self.rgb_channel_attention(x1)  # 注意力增强
-        x1_tex = self.texture_conv(x1)  # 纹理增强
+        # # ---- 插入 RGB + Texture 模块 ----
+        # x1_rgb_att = self.rgb_channel_attention(x1)  # 注意力增强
+        # x1_tex = self.texture_conv(x1)  # 纹理增强
 
-        # 拼接三个特征(用打铁形象理解, 此处就是把RGB特征、RGB注意力增强特征、纹理增强特征打成一块铁块), 送入后续网络
-        x1_enhanced = torch.cat([x1, x1_rgb_att, x1_tex], dim=1)  # shape[1, 64*3, 56, 56]
+        # # 拼接三个特征(用打铁形象理解, 此处就是把RGB特征、RGB注意力增强特征、纹理增强特征打成一块铁块), 送入后续网络
+        # x1_enhanced = torch.cat([x1, x1_rgb_att, x1_tex], dim=1)  # shape[1, 64*3, 56, 56]
 
-        # 此处理解为持续锻造, 让增强后的特征更好地融合在一起
         x2 = self.resnet.layer1(x1)  # shape[1, 256, 56, 56]
         x3 = self.resnet.layer2(x2)  # shape[1, 512, 28, 28]
         x4 = self.resnet.layer3(x3)  # shape[1, 1024, 14, 14]
@@ -274,7 +273,7 @@ class FusNet(nn.Module):
         new_fuse4_3 = self.new_fuse4_3(x5, mamba_x4)
 
         # x2 = self.fuse1(torch.cat([new_fuse1_1, new_fuse1_2, new_fuse1_3], dim=1))
-        x2 = self.fuse1(torch.cat([new_fuse1_1, new_fuse1_2, new_fuse1_3, x1_enhanced], dim=1))
+        x2 = self.fuse1(torch.cat([new_fuse1_1, new_fuse1_2, new_fuse1_3], dim=1))
         x3 = self.fuse2(torch.cat([new_fuse2_1, new_fuse2_2, new_fuse2_3], dim=1))
         x4 = self.fuse3(torch.cat([new_fuse3_1, new_fuse3_2, new_fuse3_3], dim=1))
         x5 = self.fuse4(torch.cat([new_fuse4_1, new_fuse4_2, new_fuse4_3], dim=1))
