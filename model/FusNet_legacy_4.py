@@ -1,4 +1,4 @@
-# iAFF之后传入下一层, 跳跃连接是三路融合
+# iAFF之后传入下一层, 跳跃连接是两路增强特征（swin_enh + mamba_enh）相加
 
 import torch
 import torch.nn as nn
@@ -15,21 +15,20 @@ from model.AFFUtils import iAFF
 # ─────────────────────────────────────────────
 
 
-class ProjectionAdd(nn.Module):
+class TwoBranchAdd(nn.Module):
     """
-    将三路不同通道数的特征分别用1×1conv投影到同一维度后相加。
+    将swin_enh和mamba_enh两路特征分别用1×1conv投影到同一维度后相加。
     """
 
-    def __init__(self, ch_res, ch_swin, ch_mamba, dim_out):
+    def __init__(self, ch_swin, ch_mamba, dim_out):
         super().__init__()
-        self.proj_res = nn.Conv2d(ch_res, dim_out, kernel_size=1, bias=False)
         self.proj_swin = nn.Conv2d(ch_swin, dim_out, kernel_size=1, bias=False)
         self.proj_mamba = nn.Conv2d(ch_mamba, dim_out, kernel_size=1, bias=False)
         self.norm = nn.BatchNorm2d(dim_out)
         self.act = nn.ReLU(inplace=True)
 
-    def forward(self, feat_res, feat_swin, feat_mamba):
-        return self.act(self.norm(self.proj_res(feat_res) + self.proj_swin(feat_swin) + self.proj_mamba(feat_mamba)))
+    def forward(self, feat_swin, feat_mamba):
+        return self.act(self.norm(self.proj_swin(feat_swin) + self.proj_mamba(feat_mamba)))
 
 
 class DecodeBlock(nn.Module):
@@ -41,9 +40,7 @@ class DecodeBlock(nn.Module):
     def __init__(self, in_channels, skip_channels, out_channels, scale_factor=2):
         super().__init__()
         self.scale_factor = scale_factor
-        # fuse_channels = in_channels + skip_channels
 
-        # 跳跃连接通道对齐（1×1conv压缩到out_channels）
         self.skip_proj = (
             nn.Conv2d(skip_channels, out_channels, kernel_size=1, bias=False) if skip_channels > 0 else None
         )
@@ -78,9 +75,11 @@ class FusNet(nn.Module):
     三路编码器（Res2Net + Swin-T + MambaVision）串行iAFF融合
     + FPN式解码器用于遥感竹林分割。
 
+    融合策略：iAFF增强后取swin_enh和mamba_enh两路投影相加，去掉res分支的直接参与。
+
     Args:
         num_classes:  分割类别数
-        dim_feat:     三路投影对齐的公共特征维度（默认256）
+        dim_feat:     两路投影对齐的公共特征维度（默认256）
         iaff_r:       iAFF模块的reduction ratio（默认4）
     """
 
@@ -112,9 +111,10 @@ class FusNet(nn.Module):
                 iAFF(in_channels_1=ch_mamba, in_channels_2=ch_swin, out_channels=ch_mamba, r=iaff_r)
             )
 
-        # ── 三路投影相加（每个stage一个ProjectionAdd）──────────
+        # ── 两路投影相加（swin_enh + mamba_enh，每个stage一个TwoBranchAdd）──
+        swin_mamba_channels = [(ch_swin, ch_mamba) for _, ch_swin, ch_mamba in stage_channels]
         self.proj_add = nn.ModuleList(
-            [ProjectionAdd(ch_res, ch_swin, ch_mamba, dim_feat) for ch_res, ch_swin, ch_mamba in stage_channels]
+            [TwoBranchAdd(ch_swin, ch_mamba, dim_feat) for ch_swin, ch_mamba in swin_mamba_channels]
         )
 
         # ── 跳跃连接投影（Res2Net压到dim_feat再与fused相加）───
@@ -128,20 +128,20 @@ class FusNet(nn.Module):
                     nn.ReLU(inplace=True),
                 ),
                 nn.Sequential(
-                    nn.Conv2d(512, dim_feat, kernel_size=1, bias=False), nn.BatchNorm2d(dim_feat), nn.ReLU(inplace=True)
+                    nn.Conv2d(512, dim_feat, kernel_size=1, bias=False),
+                    nn.BatchNorm2d(dim_feat),
+                    nn.ReLU(inplace=True),
                 ),
             ]
         )
 
         # ── 解码器（FPN式，Res2Net各层作为跳跃连接）────────────
-        # 输入特征维度：dim_feat（7×7）
-        # 跳跃连接维度：Res2Net layer2=1024(14×14), layer1=512(28×28), layer0=256(56×56)
         self.decoder = nn.ModuleList(
             [
                 DecodeBlock(dim_feat, skip_channels=dim_feat, out_channels=256, scale_factor=2),  # 7→14
-                DecodeBlock(256, skip_channels=dim_feat, out_channels=128, scale_factor=2),  # 14→28
-                DecodeBlock(128, skip_channels=256, out_channels=64, scale_factor=2),  # 28→56
-                DecodeBlock(64, skip_channels=0, out_channels=64, scale_factor=4),  # 56→224
+                DecodeBlock(256, skip_channels=dim_feat, out_channels=128, scale_factor=2),       # 14→28
+                DecodeBlock(128, skip_channels=256, out_channels=64, scale_factor=2),             # 28→56
+                DecodeBlock(64, skip_channels=0, out_channels=64, scale_factor=4),               # 56→224
             ]
         )
 
@@ -159,7 +159,7 @@ class FusNet(nn.Module):
         x = self.resnet.bn1(x)
         x = self.resnet.relu(x)
         x = self.resnet.maxpool(x)
-        f0 = self.resnet.layer1(x)  # (B, 256,  56×56)
+        f0 = self.resnet.layer1(x)   # (B, 256,  56×56)
         f1 = self.resnet.layer2(f0)  # (B, 512,  28×28)
         f2 = self.resnet.layer3(f1)  # (B, 1024, 14×14)
         f3 = self.resnet.layer4(f2)  # (B, 2048, 7×7)
@@ -169,7 +169,6 @@ class FusNet(nn.Module):
         """运行Swin单个stage，接受token输入，返回增强后的feature map和新token。"""
         B = tokens.shape[0]
         tokens, H, W = self.swin.layers[layer_idx](tokens, H, W)
-        # layers[0]→192, layers[1]→384, layers[2]→768
         ch = tokens.shape[-1]
         feat = tokens.permute(0, 2, 1).view(B, ch, H, W)
         return tokens, H, W, feat
@@ -194,10 +193,10 @@ class FusNet(nn.Module):
         fused = []
 
         for i in range(3):
-            # Swin 第 i 个stage（输入为上一步的token，或patch_embed后的token）
+            # Swin 第 i 个stage
             swin_tokens, H, W, swin_feat = self._swin_stage(swin_tokens, H, W, layer_idx=i)
 
-            # Mamba 第 i 个level（输入为上一步的feature map）
+            # Mamba 第 i 个level
             mamba_feat = self._mamba_stage(mamba_feat, level_idx=i)
 
             # Step1: Res2Net → Swin iAFF（Swin主体，Res2Net调制）
@@ -206,8 +205,8 @@ class FusNet(nn.Module):
             # Step2: Swin_enhanced → Mamba iAFF（Mamba主体，增强后的Swin调制）
             mamba_enh = self.iaff_swin_mamba[i](mamba_feat, swin_enh)
 
-            # Step3: 三路投影对齐后相加
-            f = self.proj_add[i](res_feats[i], swin_enh, mamba_enh)
+            # Step3: 两路投影对齐后相加（swin_enh + mamba_enh，不含res）
+            f = self.proj_add[i](swin_enh, mamba_enh)
             fused.append(f)
 
             # 将增强后的特征回写，作为下一stage的输入

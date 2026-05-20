@@ -1,3 +1,13 @@
+# FusNet_legacy_3.py
+#
+# 相比 FusNet_legacy_2.py 的改动：
+#   融合阶段（Step3）由"三路投影相加"改为"两路投影相加"。
+#   原版将原始 res_feats[i]、swin_enh、mamba_enh 三路各自经 1×1 conv 投影后相加；
+#   本版只使用经 iAFF 调制后的两路增强特征 swin_enh 和 mamba_enh 相加。
+#   Res2Net 的信息已通过第一步 iAFF（iaff_res_swin）隐式融入 swin_enh，
+#   不再单独作为第三路参与投影相加，以避免 Res2Net 特征被重复叠加。
+#   其余逻辑（串行 iAFF、跳跃连接、FPN 解码器）保持不变。
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -15,19 +25,18 @@ from model.AFFUtils import iAFF
 
 class ProjectionAdd(nn.Module):
     """
-    将三路不同通道数的特征分别用1×1conv投影到同一维度后相加。
+    将两路增强特征（swin_enh、mamba_enh）分别用1×1conv投影到同一维度后相加。
     """
 
-    def __init__(self, ch_res, ch_swin, ch_mamba, dim_out):
+    def __init__(self, ch_swin, ch_mamba, dim_out):
         super().__init__()
-        self.proj_res = nn.Conv2d(ch_res, dim_out, kernel_size=1, bias=False)
         self.proj_swin = nn.Conv2d(ch_swin, dim_out, kernel_size=1, bias=False)
         self.proj_mamba = nn.Conv2d(ch_mamba, dim_out, kernel_size=1, bias=False)
         self.norm = nn.BatchNorm2d(dim_out)
         self.act = nn.ReLU(inplace=True)
 
-    def forward(self, feat_res, feat_swin, feat_mamba):
-        return self.act(self.norm(self.proj_res(feat_res) + self.proj_swin(feat_swin) + self.proj_mamba(feat_mamba)))
+    def forward(self, feat_swin, feat_mamba):
+        return self.act(self.norm(self.proj_swin(feat_swin) + self.proj_mamba(feat_mamba)))
 
 
 class DecodeBlock(nn.Module):
@@ -78,7 +87,7 @@ class FusNet(nn.Module):
 
     Args:
         num_classes:  分割类别数
-        dim_feat:     三路投影对齐的公共特征维度（默认256）
+        dim_feat:     两路投影对齐的公共特征维度（默认256）
         iaff_r:       iAFF模块的reduction ratio（默认4）
     """
 
@@ -110,9 +119,9 @@ class FusNet(nn.Module):
                 iAFF(in_channels_1=ch_mamba, in_channels_2=ch_swin, out_channels=ch_mamba, r=iaff_r)
             )
 
-        # ── 三路投影相加（每个stage一个ProjectionAdd）──────────
+        # ── 两路投影相加（每个stage一个ProjectionAdd）─────────
         self.proj_add = nn.ModuleList(
-            [ProjectionAdd(ch_res, ch_swin, ch_mamba, dim_feat) for ch_res, ch_swin, ch_mamba in stage_channels]
+            [ProjectionAdd(ch_swin, ch_mamba, dim_feat) for _, ch_swin, ch_mamba in stage_channels]
         )
 
         # ── 跳跃连接投影（Res2Net压到dim_feat再与fused相加）───
@@ -207,8 +216,8 @@ class FusNet(nn.Module):
             # Step2: Swin_enhanced → Mamba（Mamba是主体，被增强后的Swin调制）
             mamba_enh = self.iaff_swin_mamba[i](mamba_feats[i], swin_enh)
 
-            # Step3: 三路投影对齐后相加
-            f = self.proj_add[i](res_feats[i], swin_enh, mamba_enh)
+            # Step3: 两路增强特征投影对齐后相加（不再单独引入原始res_feats）
+            f = self.proj_add[i](swin_enh, mamba_enh)
             fused.append(f)  # 每个 (B, dim_feat, H, W)
 
         # fused[0]: (B, dim_feat, 28×28)

@@ -31,11 +31,28 @@ matplotlib.rcParams.update({
 # ── Data sources ──────────────────────────────────────────────────────────────
 BASE = os.path.join(os.path.dirname(__file__), "..", "output")
 MODELS = [
-    ("DeepLabV3",            "deeplabv3_outputs",           "#4878CF", "-",  1.2),
-    ("SwinUNet",             "swinunet_outputs",            "#6ACC65", "--", 1.2),
-    ("Res+Swin",             "fusnet_outputs_res_swin",     "#D65F5F", "-.", 1.2),
-    ("Res+Mamba",            "fusnet_outputs_res_mamba",    "#B47CC7", ":",  1.4),
-    ("Swin+Mamba",           "fusnet_outputs_swin_mamba",   "#C4AD66", "--", 1.2),
+    # Standard baselines
+    ("DeepLabV3",             "deeplabv3_outputs",              "#4878CF", "-",   1.2),
+    ("DeepLabV3+",            "deeplabv3plus_outputs",          "#2196F3", "--",  1.2),
+    ("SwinUNet",              "swinunet_outputs",               "#6ACC65", "--",  1.2),
+    # Single-backbone models
+    ("Res2Net",               "res2net_outputs",                "#FF5722", "-.",  1.2),
+    ("Swin-T",                "swin_outputs",                   "#00ACC1", ":",   1.3),
+    ("MambaVision",           "mambavision_outputs",            "#9C27B0", "-",   1.2),
+    # FusNet baseline fusion variants
+    ("FusNet-Base(add)",      "fusnet_baseline_add_outputs",    "#FF9800", "--",  1.2),
+    ("FusNet-Base(cat)",      "fusnet_baseline_cat_outputs",    "#FFC107", "-.",  1.2),
+    # FusNet legacy/ablation architectures
+    ("Legacy-1",              "fusnet_legacy_1_outputs",        "#E53935", "-",   1.2),
+    ("Legacy-2",              "fusnet_legacy_2_outputs",        "#E91E63", "--",  1.2),
+    ("Legacy-3",              "fusnet_legacy_3_outputs",        "#673AB7", "-.",  1.2),
+    ("Legacy-4",              "fusnet_legacy_4_outputs",        "#3F51B5", ":",   1.2),
+    ("Legacy-5",              "fusnet_legacy_5_outputs",        "#03A9F4", "-",   1.2),
+    # Cross-attention ablations (2-backbone)
+    ("Res+Swin",              "fusnet_outputs_res_swin",        "#D65F5F", "-.",  1.2),
+    ("Res+Mamba",             "fusnet_outputs_res_mamba",       "#B47CC7", ":",   1.4),
+    ("Swin+Mamba",            "fusnet_outputs_swin_mamba",      "#C4AD66", "--",  1.2),
+    # Full FusNet
     ("FusNet (Res+Swin+Mamba)", "fusnet_outputs_res_swin_mamba", "#D62728", "-", 2.2),
 ]
 SMOOTH_WIN = 5
@@ -43,6 +60,8 @@ SMOOTH_WIN = 5
 
 def _load(folder):
     path = os.path.join(BASE, folder, "log.txt")
+    if not os.path.exists(path):
+        return None
     df = pd.read_csv(path, on_bad_lines="skip")
     df = df[pd.to_numeric(df["Epoch"], errors="coerce").notna()].copy()
     df["Epoch"] = df["Epoch"].astype(int)
@@ -54,18 +73,21 @@ def _smooth(s):
 
 
 def _save_curve(col, ylabel, title, stem):
-    fig, ax = plt.subplots(figsize=(6, 4.2))
+    fig, ax = plt.subplots(figsize=(9.5, 5.5))
 
     for label, folder, color, ls, lw in MODELS:
         df = _load(folder)
+        if df is None:
+            print(f"Skipping {label}: {folder}/log.txt not found")
+            continue
         epochs = df["Epoch"]
         vals   = _smooth(df[col])
-        is_fusnet = "FusNet" in label
+        is_fusnet = label.startswith("FusNet (")
         ax.plot(epochs, vals,
                 color=color, linestyle=ls, linewidth=lw,
                 label=label,
                 zorder=5 if is_fusnet else 3,
-                alpha=1.0 if is_fusnet else 0.85)
+                alpha=1.0 if is_fusnet else 0.80)
 
         # mark best point
         best_idx = df[col].idxmax()
@@ -91,8 +113,8 @@ def _save_curve(col, ylabel, title, stem):
     ax.spines["right"].set_visible(False)
 
     ax.legend(loc="lower right", frameon=True, framealpha=0.9,
-              edgecolor="#cccccc", fontsize=9, handlelength=2.2,
-              handletextpad=0.5)
+              edgecolor="#cccccc", fontsize=8.0, handlelength=2.2,
+              handletextpad=0.5, ncol=3, columnspacing=1.0)
 
     for fmt in ("pdf", "png"):
         path = os.path.join(os.path.dirname(__file__), f"{stem}.{fmt}")
@@ -101,6 +123,6 @@ def _save_curve(col, ylabel, title, stem):
     plt.close(fig)
 
 
-_save_curve("Val_mIoU", "Val mIoU",        "Validation mIoU over Training Epochs",        "training_curve_miou")
-_save_curve("Val_F1",   "Val F1 Score",   "Validation F1 Score over Training Epochs",   "training_curve_f1")
-_save_curve("Val_Acc",  "Val Accuracy",   "Validation Accuracy over Training Epochs",   "training_curve_acc")
+_save_curve("Val_mIoU", "Val mIoU",      "Validation mIoU over Training Epochs",      "training_curve_miou")
+_save_curve("Val_F1",   "Val F1 Score",  "Validation F1 Score over Training Epochs",  "training_curve_f1")
+_save_curve("Val_Acc",  "Val Accuracy",  "Validation Accuracy over Training Epochs",  "training_curve_acc")

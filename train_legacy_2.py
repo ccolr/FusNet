@@ -321,7 +321,7 @@ def evaluate_confusion_matrix(model, loader, device):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train FusNet_legacy_2 for bamboo binary segmentation")
+    parser = argparse.ArgumentParser(description="Train FusNet_legacy_3 for bamboo binary segmentation")
     parser.add_argument("--batch_size", type=int, default=24, help="Batch size")
     parser.add_argument("--epochs", type=int, default=120, help="Training epochs")
     parser.add_argument("--data_dir", type=str, default=".", help="Data root directory")
@@ -331,17 +331,17 @@ def main():
     set_seed(42)
 
     try:
-        from model.FusNet_legacy_2 import FusNet
+        from model.FusNet_legacy_3 import FusNet
     except ModuleNotFoundError as exc:
         raise ModuleNotFoundError(
-            "Import FusNet_legacy_2 failed. Please ensure required dependencies are installed (for example `mamba_ssm`)."
+            "Import FusNet_legacy_3 failed. Please ensure required dependencies are installed (for example `mamba_ssm`)."
         ) from exc
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     amp_enabled = device.type == "cuda"
     num_workers = min(8, os.cpu_count() if os.cpu_count() is not None else 2)
 
-    output_dir = os.path.join("fusnet_legacy_2_outputs")
+    output_dir = os.path.join("fusnet_legacy_3_outputs")
     os.makedirs(output_dir, exist_ok=True)
     log_path = os.path.join(output_dir, "log.txt")
     best_weight_path = os.path.join(output_dir, "best_model.pth")

@@ -244,7 +244,7 @@ def plot_confusion_matrix(cm: np.ndarray, class_names, save_path):
 
 
 def run_epoch(model, loader, device, train_mode, amp_enabled,
-              bce_loss=None, dice_loss=None, optimizer=None, scaler=None):
+                bce_loss=None, dice_loss=None, optimizer=None, scaler=None):
     if train_mode:
         model.train()
     else:
@@ -321,26 +321,27 @@ def evaluate_confusion_matrix(model, loader, device):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train FusNet_legacy_5 for bamboo binary segmentation")
+    parser = argparse.ArgumentParser(description="Train FusNet_legacy_2 for bamboo binary segmentation")
     parser.add_argument("--batch_size", type=int, default=24, help="Batch size")
     parser.add_argument("--epochs", type=int, default=120, help="Training epochs")
     parser.add_argument("--data_dir", type=str, default=".", help="Data root directory")
+    parser.add_argument("--num_classes", type=int, default=2, help="Output channels (1 or 2)")
     args = parser.parse_args()
 
     set_seed(42)
 
     try:
-        from model.FusNet_legacy_5 import FusNet
+        from model.FusNet_legacy_2 import FusNet
     except ModuleNotFoundError as exc:
         raise ModuleNotFoundError(
-            "Import FusNet_legacy_5 failed. Please ensure required dependencies are installed (for example `mamba_ssm`)."
+            "Import FusNet_legacy_2 failed. Please ensure required dependencies are installed (for example `mamba_ssm`)."
         ) from exc
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     amp_enabled = device.type == "cuda"
     num_workers = min(8, os.cpu_count() if os.cpu_count() is not None else 2)
 
-    output_dir = os.path.join("fusnet_legacy5_outputs")
+    output_dir = os.path.join("fusnet_legacy_2_outputs")
     os.makedirs(output_dir, exist_ok=True)
     log_path = os.path.join(output_dir, "log.txt")
     best_weight_path = os.path.join(output_dir, "best_model.pth")
@@ -381,18 +382,21 @@ def main():
         drop_last=False,
     )
 
-    model = FusNet().to(device)
+    model = FusNet(num_classes=args.num_classes).to(device)
+
+    # 预训练backbone用小lr，其余新模块用大lr
+    backbone_params = (
+        list(model.resnet.parameters())
+        + list(model.swin.parameters())
+        + list(model.mamba.parameters())
+    )
+    backbone_ids = {id(p) for p in backbone_params}
+    new_params = [p for p in model.parameters() if id(p) not in backbone_ids]
+
     optimizer = torch.optim.AdamW(
         [
-            {"params": model.resnet.parameters(),           "lr": 1e-5},
-            {"params": model.swin.parameters(),             "lr": 1e-5},
-            {"params": model.mamba.parameters(),            "lr": 1e-5},
-            {"params": model.iaff_res_swin.parameters(),   "lr": 1e-4},
-            {"params": model.iaff_swin_mamba.parameters(), "lr": 1e-4},
-            {"params": model.proj_add.parameters(),         "lr": 1e-4},
-            {"params": model.skip_proj.parameters(),        "lr": 1e-4},
-            {"params": model.decoder.parameters(),          "lr": 1e-4},
-            {"params": model.seg_head.parameters(),         "lr": 1e-4},
+            {"params": backbone_params, "lr": 1e-5},
+            {"params": new_params, "lr": 1e-4},
         ],
         weight_decay=1e-4,
     )
