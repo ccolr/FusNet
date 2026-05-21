@@ -136,7 +136,7 @@ def read_gt_mask(path: Path) -> Optional[np.ndarray]:
                 arr = src.read(1)
         else:
             arr = np.array(Image.open(str(path)).convert("L"))
-        return arr > 127
+        return arr > 0 if arr.max() <= 1 else arr > 127
     except Exception:
         return None
 
