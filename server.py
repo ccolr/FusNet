@@ -27,7 +27,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 from torchvision import transforms
 
-# ─── 模型配置（与 app.py 保持一致） ──────────────────────────────────────────
+# ─── 模型配置 ─────────────────────────────────────────────────────────────────
 MODEL_CONFIGS: dict[str, dict] = {
     "Res2Net + Swin-T + MambaVision (Full)": {
         "active_branches": ["res2net", "swin", "mamba"],
@@ -51,7 +51,7 @@ MEAN = [55.7578 / 255, 67.4502 / 255, 58.6568 / 255]
 STD  = [37.5201 / 255, 34.2345 / 255, 30.3007 / 255]
 
 # ─── FastAPI ──────────────────────────────────────────────────────────────────
-app = FastAPI(title="FusNet Inference Server", version="1.0")
+app = FastAPI(title="FusNet Inference Server", version="2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -59,8 +59,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ─── 模型缓存（进程级，按 config_name 键懒加载） ─────────────────────────────
-_model_cache: dict[str, tuple] = {}
+_model_cache: dict[str, object] = {}
 _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
@@ -139,6 +138,7 @@ class _GradCAM:
 
 
 def _run_inference(model, image: np.ndarray):
+    """Returns (probs_np, cam) where probs_np is float32 [0,1] at original resolution."""
     orig_h, orig_w = image.shape[:2]
     tensor = _preprocess(image).to(_device)
 
@@ -146,19 +146,19 @@ def _run_inference(model, image: np.ndarray):
         logits = model(tensor)
         if isinstance(logits, (tuple, list)):
             logits = logits[0]
-        logits    = F.interpolate(logits, size=(orig_h, orig_w),
-                                  mode="bilinear", align_corners=False)
-        probs     = torch.softmax(logits, dim=1)[:, 1, :, :]
-        mask_bool = (probs >= 0.5).squeeze(0).cpu().numpy()  # bool (H, W)
+        logits   = F.interpolate(logits, size=(orig_h, orig_w),
+                                 mode="bilinear", align_corners=False)
+        probs_t  = torch.softmax(logits, dim=1)[:, 1, :, :]
+        probs_np = probs_t.squeeze(0).cpu().numpy().astype(np.float32)
 
     target_layer = model.decoder[-1].conv
     gradcam      = _GradCAM(model, target_layer)
     tensor_grad  = _preprocess(image).to(_device)
     tensor_grad.requires_grad_(True)
-    cam = gradcam(tensor_grad)  # float32 (H', W')
+    cam = gradcam(tensor_grad)
     gradcam.remove()
 
-    return mask_bool, cam
+    return probs_np, cam
 
 
 # ─── API 端点 ─────────────────────────────────────────────────────────────────
@@ -194,23 +194,20 @@ async def infer(
     image = _read_image(data, file.filename or "image.png")
 
     try:
-        model          = _load_model(config_name)
-        mask_bool, cam = _run_inference(model, image)
+        model        = _load_model(config_name)
+        probs_np, cam = _run_inference(model, image)
     except Exception as exc:
         raise HTTPException(500, f"Inference failed: {exc}") from exc
 
-    # mask → base64 PNG (grayscale)
-    mask_buf = io.BytesIO()
-    Image.fromarray((mask_bool.astype(np.uint8)) * 255, mode="L").save(mask_buf, format="PNG")
-    mask_b64 = base64.b64encode(mask_buf.getvalue()).decode()
-
-    # cam → base64 raw float32 bytes（附带 shape，客户端重建 ndarray）
-    cam_b64 = base64.b64encode(cam.tobytes()).decode()
+    # probs → base64 raw float32 bytes + shape (client applies threshold locally)
+    probs_b64 = base64.b64encode(probs_np.tobytes()).decode()
+    cam_b64   = base64.b64encode(cam.tobytes()).decode()
 
     return {
-        "mask":      mask_b64,
-        "cam":       cam_b64,
-        "cam_shape": list(cam.shape),
+        "probs":       probs_b64,
+        "probs_shape": list(probs_np.shape),
+        "cam":         cam_b64,
+        "cam_shape":   list(cam.shape),
     }
 
 
