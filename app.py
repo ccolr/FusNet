@@ -697,17 +697,6 @@ uploaded_files = st.file_uploader(
 
 _use_disk_cache = not uploaded_files and bool(_disk_stems)
 
-if uploaded_files and st.button("Clear all", icon="🗑️"):
-    _clear_disk_cache()
-    st.session_state.uploader_key += 1
-    st.session_state.pop("_infer_key", None)
-    st.rerun()
-
-if _use_disk_cache and st.button("清除缓存", icon="🗑️", help="清除刷新保留的缓存，回到初始状态"):
-    _clear_disk_cache()
-    st.session_state.pop("_infer_key", None)
-    st.rerun()
-
 if not uploaded_files and not _use_disk_cache:
     st.info("👆 Upload at least one image to get started.", icon="ℹ️")
     st.stop()
@@ -840,14 +829,27 @@ if not valid_stems:
 n_done = sum(1 for s in valid_stems for c in selected_configs if c in all_results[s])
 st.success(f"Done — {len(valid_stems)} image(s), {n_done} inference(s) completed.", icon="✅")
 
-# ─── 搜索 + 折叠控制 + 全局下载 ──────────────────────────────────────────────
-col_search, col_toggle, col_dl = st.columns([3, 1, 1])
+# ─── 搜索 + 清除 + 折叠控制 + 全局下载 ──────────────────────────────────────
+col_search, col_clear, col_toggle, col_dl = st.columns([3, 1, 1, 1])
 with col_search:
     search_query = st.text_input(
         "search",
         placeholder="🔍  Filter images by filename…",
         label_visibility="collapsed",
     )
+with col_clear:
+    if uploaded_files:
+        if st.button("🗑️ Clear All", use_container_width=True):
+            _clear_disk_cache()
+            st.session_state.uploader_key += 1
+            st.session_state.pop("_infer_key", None)
+            st.rerun()
+    elif _use_disk_cache:
+        if st.button("🗑️ 清除缓存", use_container_width=True,
+                     help="清除刷新保留的缓存，回到初始状态"):
+            _clear_disk_cache()
+            st.session_state.pop("_infer_key", None)
+            st.rerun()
 with col_toggle:
     toggle_label = "⊖ Collapse All" if st.session_state.expanders_expanded else "⊕ Expand All"
     if st.button(toggle_label, use_container_width=True):
