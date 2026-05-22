@@ -543,41 +543,57 @@ if not selected_configs:
     st.stop()
 
 # ─── 推理阶段 ─────────────────────────────────────────────────────────────────
-all_results: dict[str, dict]                 = {}
-all_gt:      dict[str, Optional[np.ndarray]] = {}
+_infer_key = (
+    st.session_state.uploader_key,
+    tuple((f.name, f.size) for f in uploaded_files),
+    tuple(sorted(selected_configs)),
+    mode,
+    gt_dir_input.strip() if mode == "Research" else "",
+)
 
-n_total  = len(uploaded_files) * len(selected_configs)
-progress = st.progress(0, text="Sending to inference server…")
-task_idx = 0
+if st.session_state.get("_infer_key") == _infer_key:
+    all_results: dict[str, dict]                 = st.session_state["_all_results"]
+    all_gt:      dict[str, Optional[np.ndarray]] = st.session_state["_all_gt"]
+else:
+    all_results = {}
+    all_gt      = {}
 
-for uf in uploaded_files:
-    raw_bytes = uf.read()
-    image     = read_image_bytes(raw_bytes, uf.name)
-    stem      = Path(uf.name).stem
+    n_total  = len(uploaded_files) * len(selected_configs)
+    progress = st.progress(0, text="Sending to inference server…")
+    task_idx = 0
 
-    all_results[stem] = {"_raw": image}
+    for uf in uploaded_files:
+        raw_bytes = uf.read()
+        image     = read_image_bytes(raw_bytes, uf.name)
+        stem      = Path(uf.name).stem
 
-    if mode == "Research" and gt_dir_input.strip():
-        all_gt[stem] = call_gt_api(server_url, gt_dir_input.strip(), stem)
+        all_results[stem] = {"_raw": image}
 
-    for cfg_name in selected_configs:
-        task_idx += 1
-        progress.progress(task_idx / n_total, text=f"Inferring {uf.name} [{cfg_name}]…")
+        if mode == "Research" and gt_dir_input.strip():
+            all_gt[stem] = call_gt_api(server_url, gt_dir_input.strip(), stem)
 
-        if not server_configs.get(cfg_name, {}).get("weight_available", False):
-            st.warning(f"`{cfg_name}` — weight not found on server, skipped.", icon="⚠️")
-            continue
+        for cfg_name in selected_configs:
+            task_idx += 1
+            progress.progress(task_idx / n_total, text=f"Inferring {uf.name} [{cfg_name}]…")
 
-        ikey = f"{cfg_name}::{uf.name}::{uf.size}"
-        try:
-            probs, cam = call_infer_api(server_url, cfg_name, ikey, raw_bytes, uf.name)
-            all_results[stem][cfg_name] = {"probs": probs, "cam": cam}
-        except requests.HTTPError as e:
-            st.error(f"**{uf.name}** [{cfg_name}] 服务器错误: {e.response.text}", icon="🚨")
-        except Exception as e:
-            st.error(f"**{uf.name}** [{cfg_name}] 请求失败: {e}", icon="🚨")
+            if not server_configs.get(cfg_name, {}).get("weight_available", False):
+                st.warning(f"`{cfg_name}` — weight not found on server, skipped.", icon="⚠️")
+                continue
 
-progress.empty()
+            ikey = f"{cfg_name}::{uf.name}::{uf.size}"
+            try:
+                probs, cam = call_infer_api(server_url, cfg_name, ikey, raw_bytes, uf.name)
+                all_results[stem][cfg_name] = {"probs": probs, "cam": cam}
+            except requests.HTTPError as e:
+                st.error(f"**{uf.name}** [{cfg_name}] 服务器错误: {e.response.text}", icon="🚨")
+            except Exception as e:
+                st.error(f"**{uf.name}** [{cfg_name}] 请求失败: {e}", icon="🚨")
+
+    progress.empty()
+
+    st.session_state["_infer_key"]    = _infer_key
+    st.session_state["_all_results"]  = all_results
+    st.session_state["_all_gt"]       = all_gt
 
 valid_stems = [
     s for s in all_results
