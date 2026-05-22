@@ -24,6 +24,7 @@ from typing import Optional
 
 import cv2
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -40,7 +41,8 @@ st.set_page_config(
 )
 
 # ─── 全局样式 ─────────────────────────────────────────────────────────────────
-st.markdown("""
+st.markdown(
+    """
 <style>
   @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=DM+Sans:wght@300;400;500;600&display=swap');
 
@@ -161,25 +163,30 @@ st.markdown("""
     opacity: 1;
   }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 # ─── 常量 ─────────────────────────────────────────────────────────────────────
-COLOR_PRED  = (220, 30,  30)   # red overlay for predictions
-COLOR_GT    = (220, 30,  30)   # red overlay for GT (same as prediction)
-IMAGE_EXTS  = {".tif", ".tiff", ".png", ".jpg", ".jpeg"}
-ALL_METRICS = ["Precision", "Recall", "F1", "IoU", "mIoU", "Accuracy"]
+COLOR_PRED = (220, 30, 30)  # red overlay for predictions
+COLOR_GT = (220, 30, 30)  # red overlay for GT (same as prediction)
+IMAGE_EXTS = {".tif", ".tiff", ".png", ".jpg", ".jpeg"}
+ALL_METRICS = ["Accuracy", "Precision", "Recall", "F1", "IoU", "mIoU"]
 
-PANEL_NAMES_DEFAULT  = ["Original", "Pred_Mask", "Pred_Overlay", "GradCAM"]
+PANEL_NAMES_DEFAULT = ["Original", "Pred_Mask", "Pred_Overlay", "GradCAM"]
 PANEL_NAMES_RESEARCH = ["Original", "GT_Mask", "Pred_Mask", "GT_Overlay", "Pred_Overlay", "GradCAM"]
 
 # ─── 磁盘缓存工具 ─────────────────────────────────────────────────────────────
 _DISK_CACHE_DIR = Path(".fusnet_session")
 
+
 def _fhash(name: str, size: int) -> str:
     return hashlib.md5(f"{name}:{size}".encode()).hexdigest()[:12]
 
+
 def _chash(cfg: str) -> str:
     return hashlib.md5(cfg.encode()).hexdigest()[:8]
+
 
 def _save_sidebar(state: dict):
     try:
@@ -188,12 +195,14 @@ def _save_sidebar(state: dict):
     except Exception:
         pass
 
+
 def _load_sidebar() -> dict:
     p = _DISK_CACHE_DIR / "sidebar.json"
     try:
         return json.loads(p.read_text()) if p.exists() else {}
     except Exception:
         return {}
+
 
 def _save_stems_meta(stems: list):
     try:
@@ -202,6 +211,7 @@ def _save_stems_meta(stems: list):
     except Exception:
         pass
 
+
 def _load_stems_meta() -> list:
     p = _DISK_CACHE_DIR / "stems.json"
     try:
@@ -209,19 +219,23 @@ def _load_stems_meta() -> list:
     except Exception:
         return []
 
+
 def _save_image_cache(name: str, size: int, arr: np.ndarray):
     d = _DISK_CACHE_DIR / "images"
     d.mkdir(parents=True, exist_ok=True)
     np.save(d / f"{_fhash(name, size)}.npy", arr)
 
+
 def _load_image_cache(name: str, size: int) -> Optional[np.ndarray]:
     p = _DISK_CACHE_DIR / "images" / f"{_fhash(name, size)}.npy"
     return np.load(p) if p.exists() else None
+
 
 def _save_result_cache(name: str, size: int, cfg: str, probs: np.ndarray, cam: np.ndarray):
     d = _DISK_CACHE_DIR / "results"
     d.mkdir(parents=True, exist_ok=True)
     np.savez(d / f"{_fhash(name, size)}_{_chash(cfg)}.npz", probs=probs, cam=cam)
+
 
 def _load_result_cache(name: str, size: int, cfg: str) -> Optional[dict]:
     p = _DISK_CACHE_DIR / "results" / f"{_fhash(name, size)}_{_chash(cfg)}.npz"
@@ -230,6 +244,7 @@ def _load_result_cache(name: str, size: int, cfg: str) -> Optional[dict]:
     d = np.load(p)
     return {"probs": d["probs"], "cam": d["cam"]}
 
+
 def _save_gt_cache(name: str, size: int, gt: Optional[np.ndarray]):
     if gt is None:
         return
@@ -237,9 +252,11 @@ def _save_gt_cache(name: str, size: int, gt: Optional[np.ndarray]):
     d.mkdir(parents=True, exist_ok=True)
     np.save(d / f"{_fhash(name, size)}.npy", gt.astype(np.uint8))
 
+
 def _load_gt_cache(name: str, size: int) -> Optional[np.ndarray]:
     p = _DISK_CACHE_DIR / "gt" / f"{_fhash(name, size)}.npy"
     return np.load(p).astype(bool) if p.exists() else None
+
 
 def _clear_disk_cache():
     if _DISK_CACHE_DIR.exists():
@@ -250,6 +267,7 @@ def _clear_disk_cache():
 def read_image_bytes(data: bytes, filename: str) -> np.ndarray:
     if filename.lower().endswith((".tif", ".tiff")):
         import rasterio, tempfile
+
         with tempfile.NamedTemporaryFile(suffix=".tif", delete=False) as tmp:
             tmp.write(data)
             tmp_path = tmp.name
@@ -278,7 +296,7 @@ def overlay_mask(
     color: tuple = COLOR_PRED,
 ) -> np.ndarray:
     out = image.astype(np.float32).copy()
-    c   = np.array(color, dtype=np.float32)
+    c = np.array(color, dtype=np.float32)
     for i in range(3):
         out[:, :, i] = np.where(
             mask,
@@ -289,9 +307,9 @@ def overlay_mask(
 
 
 def apply_heatmap(image: np.ndarray, cam: np.ndarray, alpha: float) -> np.ndarray:
-    h, w  = image.shape[:2]
+    h, w = image.shape[:2]
     cam_r = cv2.resize(cam, (w, h), interpolation=cv2.INTER_LINEAR)
-    hmap  = cv2.applyColorMap((cam_r * 255).astype(np.uint8), cv2.COLORMAP_JET)[:, :, ::-1]
+    hmap = cv2.applyColorMap((cam_r * 255).astype(np.uint8), cv2.COLORMAP_JET)[:, :, ::-1]
     blend = image.astype(np.float32) * (1 - alpha) + hmap.astype(np.float32) * alpha
     return np.clip(blend, 0, 255).astype(np.uint8)
 
@@ -299,33 +317,26 @@ def apply_heatmap(image: np.ndarray, cam: np.ndarray, alpha: float) -> np.ndarra
 def resize_mask_bool(mask: np.ndarray, h: int, w: int) -> np.ndarray:
     if mask.shape == (h, w):
         return mask
-    return (
-        np.array(
-            Image.fromarray(mask.astype(np.uint8) * 255, "L").resize(
-                (w, h), Image.NEAREST
-            )
-        )
-        > 127
-    )
+    return np.array(Image.fromarray(mask.astype(np.uint8) * 255, "L").resize((w, h), Image.NEAREST)) > 127
 
 
 # ─── 指标计算 ─────────────────────────────────────────────────────────────────
 def compute_metrics(pred: np.ndarray, gt: np.ndarray) -> dict:
     p, g = pred.astype(bool).ravel(), gt.astype(bool).ravel()
-    tp   = int(( p &  g).sum())
-    fp   = int(( p & ~g).sum())
-    fn   = int((~p &  g).sum())
-    tn   = int((~p & ~g).sum())
-    eps  = 1e-8
+    tp = int((p & g).sum())
+    fp = int((p & ~g).sum())
+    fn = int((~p & g).sum())
+    tn = int((~p & ~g).sum())
+    eps = 1e-8
     iou_fg = tp / (tp + fp + fn + eps)
     iou_bg = tn / (tn + fn + fp + eps)
     return {
+        "Accuracy": (tp + tn) / (tp + fp + fn + tn + eps),
         "Precision": tp / (tp + fp + eps),
-        "Recall":    tp / (tp + fn + eps),
-        "F1":        2 * tp / (2 * tp + fp + fn + eps),
-        "IoU":       iou_fg,
-        "mIoU":      (iou_fg + iou_bg) / 2,
-        "Accuracy":  (tp + tn) / (tp + fp + fn + tn + eps),
+        "Recall": tp / (tp + fn + eps),
+        "F1": 2 * tp / (2 * tp + fp + fn + eps),
+        "IoU": iou_fg,
+        "mIoU": (iou_fg + iou_bg) / 2,
     }
 
 
@@ -333,34 +344,29 @@ def compute_metrics(pred: np.ndarray, gt: np.ndarray) -> dict:
 def paper_table_html(model_metrics: dict, metrics: list) -> str:
     if not model_metrics or not metrics:
         return ""
-    best = {
-        m: max(model_metrics, key=lambda mn: model_metrics[mn].get(m, 0))
-        for m in metrics
-    }
+    best = {m: max(model_metrics, key=lambda mn: model_metrics[mn].get(m, 0)) for m in metrics}
     header = "<thead><tr><th>Model</th>" + "".join(f"<th>{m}</th>" for m in metrics) + "</tr></thead>"
-    rows   = ""
+    rows = ""
     for mn, mv in model_metrics.items():
         cells = ""
         for m in metrics:
-            v   = mv.get(m, float("nan"))
+            v = mv.get(m, float("nan"))
             cls = ' class="best"' if mn == best[m] else ""
             cells += f"<td{cls}>{v:.4f}</td>"
         rows += f"<tr><td>{mn}</td>{cells}</tr>"
     return (
-        f'<div class="paper-table-wrap">'
-        f'<table class="paper-table">{header}<tbody>{rows}</tbody></table>'
-        f'</div>'
+        f'<div class="paper-table-wrap">' f'<table class="paper-table">{header}<tbody>{rows}</tbody></table>' f"</div>"
     )
 
 
 # ─── 论文级柱状图 ─────────────────────────────────────────────────────────────
 def metrics_barchart_png(model_metrics: dict, metrics: list) -> bytes:
-    models  = list(model_metrics.keys())
+    models = list(model_metrics.keys())
     n_m, nc = len(metrics), len(models)
-    y       = np.arange(n_m)
-    bw      = min(0.65 / max(nc, 1), 0.25)
+    y = np.arange(n_m)
+    bw = min(0.65 / max(nc, 1), 0.25)
     offsets = (np.arange(nc) - (nc - 1) / 2) * bw
-    cmap    = plt.get_cmap("tab10").colors  # type: ignore
+    cmap = plt.get_cmap("tab10").colors  # type: ignore
 
     fig_h = max(5.5, n_m * 0.8 + nc * 0.5 + 1.5)
     fig, ax = plt.subplots(figsize=(10, fig_h), dpi=180)
@@ -372,15 +378,15 @@ def metrics_barchart_png(model_metrics: dict, metrics: list) -> bytes:
 
     for i, (mn, off) in enumerate(zip(models, offsets)):
         vals = [model_metrics[mn].get(m, 0) for m in metrics]
-        bars = ax.barh(y + off, vals, bw * 0.90,
-                       label=mn, color=cmap[i % 10],
-                       edgecolor="white", linewidth=0.6)
+        bars = ax.barh(y + off, vals, bw * 0.90, label=mn, color=cmap[i % 10], edgecolor="white", linewidth=0.6)
         for b, v in zip(bars, vals):
             ax.text(
                 min(b.get_width() + 0.005, xmax - 0.002),
                 b.get_y() + b.get_height() / 2,
                 f"{v:.3f}",
-                ha="left", va="center", fontsize=8,
+                ha="left",
+                va="center",
+                fontsize=8,
             )
 
     ax.set_yticks(y)
@@ -415,11 +421,11 @@ def metrics_barchart_png(model_metrics: dict, metrics: list) -> bytes:
 # ─── API 调用 ─────────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def call_infer_api(
-    server_url:  str,
+    server_url: str,
     config_name: str,
-    image_key:   str,
-    raw_bytes:   bytes,
-    filename:    str,
+    image_key: str,
+    raw_bytes: bytes,
+    filename: str,
 ) -> tuple[np.ndarray, np.ndarray]:
     resp = requests.post(
         f"{server_url}/infer",
@@ -429,12 +435,8 @@ def call_infer_api(
     )
     resp.raise_for_status()
     d = resp.json()
-    probs = np.frombuffer(
-        base64.b64decode(d["probs"]), dtype=np.float32
-    ).reshape(tuple(d["probs_shape"]))
-    cam = np.frombuffer(
-        base64.b64decode(d["cam"]), dtype=np.float32
-    ).reshape(tuple(d["cam_shape"]))
+    probs = np.frombuffer(base64.b64decode(d["probs"]), dtype=np.float32).reshape(tuple(d["probs_shape"]))
+    cam = np.frombuffer(base64.b64decode(d["cam"]), dtype=np.float32).reshape(tuple(d["cam_shape"]))
     return probs, cam
 
 
@@ -448,10 +450,8 @@ def call_gt_api(server_url: str, gt_dir: str, stem: str) -> Optional[np.ndarray]
             timeout=30,
         )
         if r.status_code == 200:
-            d    = r.json()
-            mask = np.frombuffer(
-                base64.b64decode(d["mask"]), dtype=np.uint8
-            ).reshape(tuple(d["shape"]))
+            d = r.json()
+            mask = np.frombuffer(base64.b64decode(d["mask"]), dtype=np.uint8).reshape(tuple(d["shape"]))
             return mask.astype(bool)
     except Exception:
         pass
@@ -479,44 +479,44 @@ def check_health(server_url: str) -> Optional[dict]:
 
 # ─── ZIP 构建 ─────────────────────────────────────────────────────────────────
 def build_results_zip(
-    all_results:      dict,
-    all_gt:           dict,
+    all_results: dict,
+    all_gt: dict,
     selected_configs: list,
-    conf_threshold:   float,
-    overlay_alpha:    float,
-    heatmap_alpha:    float,
-    download_types:   list,
+    conf_threshold: float,
+    overlay_alpha: float,
+    heatmap_alpha: float,
+    download_types: list,
 ) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for stem in all_results:
             raw_image = all_results[stem]["_raw"]
-            h, w      = raw_image.shape[:2]
-            gt_bool   = all_gt.get(stem)
+            h, w = raw_image.shape[:2]
+            gt_bool = all_gt.get(stem)
 
             for cfg_name in selected_configs:
                 if cfg_name not in all_results[stem]:
                     continue
-                probs      = all_results[stem][cfg_name]["probs"]
-                cam        = all_results[stem][cfg_name]["cam"]
-                mask_bool  = resize_mask_bool(probs >= conf_threshold, h, w)
-                mask_u8    = mask_bool.astype(np.uint8) * 255
+                probs = all_results[stem][cfg_name]["probs"]
+                cam = all_results[stem][cfg_name]["cam"]
+                mask_bool = resize_mask_bool(probs >= conf_threshold, h, w)
+                mask_u8 = mask_bool.astype(np.uint8) * 255
                 pred_blend = overlay_mask(raw_image, mask_bool, overlay_alpha, COLOR_PRED)
-                heatmap    = apply_heatmap(raw_image, cam, heatmap_alpha)
+                heatmap = apply_heatmap(raw_image, cam, heatmap_alpha)
 
                 safe_cfg = cfg_name.replace("/", "_").replace(" ", "_")
 
                 panels: dict[str, tuple[np.ndarray, str]] = {
-                    "Original":     (raw_image,  "RGB"),
-                    "Pred_Mask":    (mask_u8,    "L"),
+                    "Original": (raw_image, "RGB"),
+                    "Pred_Mask": (mask_u8, "L"),
                     "Pred_Overlay": (pred_blend, "RGB"),
-                    "GradCAM":      (heatmap,    "RGB"),
+                    "GradCAM": (heatmap, "RGB"),
                 }
                 if gt_bool is not None:
-                    gt_r  = resize_mask_bool(gt_bool, h, w)
+                    gt_r = resize_mask_bool(gt_bool, h, w)
                     gt_u8 = gt_r.astype(np.uint8) * 255
                     gt_blend = overlay_mask(raw_image, gt_r, overlay_alpha, COLOR_GT)
-                    panels["GT_Mask"]    = (gt_u8,    "L")
+                    panels["GT_Mask"] = (gt_u8, "L")
                     panels["GT_Overlay"] = (gt_blend, "RGB")
 
                 for panel_name, (arr, mode_l) in panels.items():
@@ -538,9 +538,9 @@ if "_sb_initialized" not in st.session_state:
 
 # ─── 侧边栏 ───────────────────────────────────────────────────────────────────
 selected_metrics: list = ALL_METRICS[:]
-gt_dir_input:     str  = ""
+gt_dir_input: str = ""
 selected_configs: list = []
-download_types:   list = []
+download_types: list = []
 
 with st.sidebar:
     st.markdown("## 🌿 FusNet")
@@ -573,58 +573,51 @@ with st.sidebar:
     st.divider()
 
     server_configs = fetch_server_configs(server_url) or {}
-    all_names      = list(server_configs.keys())
-    avail_names    = [n for n in all_names if server_configs[n].get("weight_available")]
+    all_names = list(server_configs.keys())
+    avail_names = [n for n in all_names if server_configs[n].get("weight_available")]
 
     if not server_configs:
         st.warning("无法获取服务器配置", icon="⚠️")
     else:
-        # 过滤缓存的选择项，确保只保留当前服务器提供的配置
-        if "sb_selected_configs" in st.session_state:
-            st.session_state["sb_selected_configs"] = [
-                c for c in st.session_state["sb_selected_configs"] if c in all_names
-            ]
-        _cfg_default = st.session_state.get("sb_selected_configs", avail_names[:1] if avail_names else [])
-        selected_configs = st.multiselect(
-            "Network configurations",
-            all_names,
-            default=_cfg_default,
-            key="sb_selected_configs",
-            help="可同时选多个模型推理并对比结果",
-        )
-        for n in selected_configs:
-            ok  = server_configs[n].get("weight_available", False)
+        _cfg_saved = st.session_state.get("sb_selected_configs", avail_names[:1] if avail_names else [])
+        st.markdown("**Network configurations**")
+        selected_configs = []
+        for n in all_names:
+            ok = server_configs[n].get("weight_available", False)
             ico = "✅" if ok else "⚠️"
-            st.caption(f"{ico} {n}")
+            _ck = f"sb_cfg__{n}"
+            if _ck not in st.session_state:
+                st.session_state[_ck] = n in _cfg_saved
+            if st.checkbox(f"{ico} {n}", key=_ck):
+                selected_configs.append(n)
 
     st.divider()
 
     conf_threshold = st.slider(
         "Confidence threshold",
-        0.0, 1.0, 0.5, 0.01,
+        0.0,
+        1.0,
+        0.5,
+        0.01,
         key="sb_conf_threshold",
         help="像素判定为竹林的概率下限，调节不重新推理（本地实时计算）",
     )
-    heatmap_alpha = st.slider("Heatmap blend α", 0.1, 0.9, 0.5,  0.05,
-                              key="sb_heatmap_alpha",
-                              help="热力图与原图混合比例")
-    overlay_alpha = st.slider("Mask overlay α",  0.1, 0.9, 0.45, 0.05,
-                              key="sb_overlay_alpha",
-                              help="掩码叠加层不透明度")
+    heatmap_alpha = st.slider(
+        "Heatmap blend α", 0.1, 0.9, 0.5, 0.05, key="sb_heatmap_alpha", help="热力图与原图混合比例"
+    )
+    overlay_alpha = st.slider("Mask overlay α", 0.1, 0.9, 0.45, 0.05, key="sb_overlay_alpha", help="掩码叠加层不透明度")
 
     st.divider()
     _all_panel_names = PANEL_NAMES_RESEARCH if mode == "Research" else PANEL_NAMES_DEFAULT
-    if "sb_download_types" in st.session_state:
-        st.session_state["sb_download_types"] = [
-            t for t in st.session_state["sb_download_types"] if t in _all_panel_names
-        ]
-    download_types = st.multiselect(
-        "Download image types",
-        _all_panel_names,
-        default=st.session_state.get("sb_download_types", _all_panel_names),
-        key="sb_download_types",
-        help="选择 ZIP 下载时包含的图片类型，结构为 模型/类型/图片.png",
-    )
+    _dl_saved = st.session_state.get("sb_download_types", _all_panel_names)
+    st.markdown("**Download image types**")
+    download_types = []
+    for t in _all_panel_names:
+        _dk = f"sb_dl__{t}"
+        if _dk not in st.session_state:
+            st.session_state[_dk] = t in _dl_saved
+        if st.checkbox(t, key=_dk):
+            download_types.append(t)
     if not download_types:
         download_types = _all_panel_names[:]
 
@@ -637,45 +630,38 @@ with st.sidebar:
             key="sb_gt_dir_input",
             help="运行 server.py 的服务端机器上的标签文件夹绝对路径。",
         )
-        if "sb_selected_metrics" in st.session_state:
-            st.session_state["sb_selected_metrics"] = [
-                m for m in st.session_state["sb_selected_metrics"] if m in ALL_METRICS
-            ]
-        selected_metrics = st.multiselect(
-            "Metrics to display",
-            ALL_METRICS,
-            default=st.session_state.get("sb_selected_metrics", ALL_METRICS),
-            key="sb_selected_metrics",
-            help="选择在表格和图表中展示的指标",
-        )
+        _metrics_saved = st.session_state.get("sb_selected_metrics", ALL_METRICS)
+        st.markdown("**Metrics to display**")
+        selected_metrics = []
+        for m in ALL_METRICS:
+            _mk = f"sb_metric__{m}"
+            if _mk not in st.session_state:
+                st.session_state[_mk] = m in _metrics_saved
+            if st.checkbox(m, key=_mk):
+                selected_metrics.append(m)
         if not selected_metrics:
             selected_metrics = ALL_METRICS[:]
 
     # 每次渲染后将当前 sidebar 状态写入磁盘，供刷新后恢复
-    _save_sidebar({
-        "sb_mode":             mode,
-        "sb_server_url":       server_url,
-        "sb_selected_configs": selected_configs,
-        "sb_conf_threshold":   conf_threshold,
-        "sb_heatmap_alpha":    heatmap_alpha,
-        "sb_overlay_alpha":    overlay_alpha,
-        "sb_download_types":   download_types,
-        "sb_gt_dir_input":     gt_dir_input if mode == "Research" else "",
-        "sb_selected_metrics": selected_metrics if mode == "Research" else list(ALL_METRICS),
-    })
+    _save_sidebar(
+        {
+            "sb_mode": mode,
+            "sb_server_url": server_url,
+            "sb_selected_configs": selected_configs,
+            "sb_conf_threshold": conf_threshold,
+            "sb_heatmap_alpha": heatmap_alpha,
+            "sb_overlay_alpha": overlay_alpha,
+            "sb_download_types": download_types,
+            "sb_gt_dir_input": gt_dir_input if mode == "Research" else "",
+            "sb_selected_metrics": selected_metrics if mode == "Research" else list(ALL_METRICS),
+        }
+    )
 
 
 # ─── 主内容区 ─────────────────────────────────────────────────────────────────
 st.title("FusNet · Bamboo Segmentation")
-mode_label = (
-    "Default — Multi-model Prediction"
-    if mode == "Default"
-    else "Research — GT Comparison & Metrics"
-)
-st.caption(
-    f"Upload images (`.tif`, `.tiff`, `.png`, `.jpg`) to run inference.  "
-    f"Mode: **{mode_label}**"
-)
+mode_label = "Default — Multi-model Prediction" if mode == "Default" else "Research — GT Comparison & Metrics"
+st.caption(f"Upload images (`.tif`, `.tiff`, `.png`, `.jpg`) to run inference.  " f"Mode: **{mode_label}**")
 
 if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0
@@ -702,15 +688,15 @@ if not uploaded_files and not _use_disk_cache:
     st.stop()
 
 # ─── 推理 / 磁盘缓存恢复 ──────────────────────────────────────────────────────
-all_results: dict[str, dict]                 = {}
-all_gt:      dict[str, Optional[np.ndarray]] = {}
+all_results: dict[str, dict] = {}
+all_gt: dict[str, Optional[np.ndarray]] = {}
 
 if _use_disk_cache:
     # 从磁盘缓存恢复所有结果，无需服务器在线
     _cache_key = ("disk", tuple(sm["stem"] for sm in _disk_stems))
     if st.session_state.get("_infer_key") == _cache_key:
         all_results = st.session_state["_all_results"]
-        all_gt      = st.session_state["_all_gt"]
+        all_gt = st.session_state["_all_gt"]
     else:
         for sm in _disk_stems:
             img = _load_image_cache(sm["name"], sm["size"])
@@ -725,16 +711,14 @@ if _use_disk_cache:
             gt = _load_gt_cache(sm["name"], sm["size"])
             if gt is not None:
                 all_gt[stem] = gt
-        st.session_state["_infer_key"]   = _cache_key
+        st.session_state["_infer_key"] = _cache_key
         st.session_state["_all_results"] = all_results
-        st.session_state["_all_gt"]      = all_gt
+        st.session_state["_all_gt"] = all_gt
         st.session_state["_panel_cache"] = {}
 
     # 若 sidebar 没选模型，回退到缓存中存在的模型列表
     if not selected_configs:
-        selected_configs = list(dict.fromkeys(
-            cfg for sm in _disk_stems for cfg in sm.get("configs", [])
-        ))
+        selected_configs = list(dict.fromkeys(cfg for sm in _disk_stems for cfg in sm.get("configs", [])))
 
     st.info("💾 显示缓存结果（上次推理）。上传新图片可重新推理。", icon="💾")
 
@@ -758,16 +742,16 @@ else:
 
     if st.session_state.get("_infer_key") == _infer_key:
         all_results = st.session_state["_all_results"]
-        all_gt      = st.session_state["_all_gt"]
+        all_gt = st.session_state["_all_gt"]
     else:
-        n_total  = len(uploaded_files) * len(selected_configs)
+        n_total = len(uploaded_files) * len(selected_configs)
         progress = st.progress(0, text="Sending to inference server…")
         task_idx = 0
 
         for uf in uploaded_files:
             raw_bytes = uf.read()
-            image     = read_image_bytes(raw_bytes, uf.name)
-            stem      = Path(uf.name).stem
+            image = read_image_bytes(raw_bytes, uf.name)
+            stem = Path(uf.name).stem
 
             all_results[stem] = {"_raw": image}
 
@@ -803,26 +787,22 @@ else:
             cfg_list = []
             for cfg in selected_configs:
                 if cfg in all_results[stem]:
-                    _save_result_cache(uf.name, uf.size, cfg,
-                                       all_results[stem][cfg]["probs"],
-                                       all_results[stem][cfg]["cam"])
+                    _save_result_cache(
+                        uf.name, uf.size, cfg, all_results[stem][cfg]["probs"], all_results[stem][cfg]["cam"]
+                    )
                     cfg_list.append(cfg)
             gt = all_gt.get(stem)
             if gt is not None:
                 _save_gt_cache(uf.name, uf.size, gt)
-            _existing_meta[stem] = {"stem": stem, "name": uf.name,
-                                     "size": uf.size, "configs": cfg_list}
+            _existing_meta[stem] = {"stem": stem, "name": uf.name, "size": uf.size, "configs": cfg_list}
         _save_stems_meta(list(_existing_meta.values()))
 
-        st.session_state["_infer_key"]   = _infer_key
+        st.session_state["_infer_key"] = _infer_key
         st.session_state["_all_results"] = all_results
-        st.session_state["_all_gt"]      = all_gt
+        st.session_state["_all_gt"] = all_gt
         st.session_state["_panel_cache"] = {}
 
-valid_stems = [
-    s for s in all_results
-    if any(c in all_results[s] for c in selected_configs)
-]
+valid_stems = [s for s in all_results if any(c in all_results[s] for c in selected_configs)]
 if not valid_stems:
     st.stop()
 
@@ -845,8 +825,7 @@ with col_clear:
             st.session_state.pop("_infer_key", None)
             st.rerun()
     elif _use_disk_cache:
-        if st.button("🗑️ 清除缓存", use_container_width=True,
-                     help="清除刷新保留的缓存，回到初始状态"):
+        if st.button("🗑️ 清除缓存", use_container_width=True, help="清除刷新保留的缓存，回到初始状态"):
             _clear_disk_cache()
             st.session_state.pop("_infer_key", None)
             st.rerun()
@@ -859,17 +838,23 @@ with col_dl:
     if download_types:
         _zip_cache_key = (
             st.session_state.get("_infer_key"),
-            conf_threshold, overlay_alpha, heatmap_alpha,
+            conf_threshold,
+            overlay_alpha,
+            heatmap_alpha,
             tuple(sorted(download_types)),
         )
         if st.session_state.get("_zip_cache_key") != _zip_cache_key:
             zip_bytes = build_results_zip(
-                all_results, all_gt, selected_configs,
-                conf_threshold, overlay_alpha, heatmap_alpha,
+                all_results,
+                all_gt,
+                selected_configs,
+                conf_threshold,
+                overlay_alpha,
+                heatmap_alpha,
                 download_types,
             )
             st.session_state["_zip_cache_key"] = _zip_cache_key
-            st.session_state["_zip_bytes"]     = zip_bytes
+            st.session_state["_zip_bytes"] = zip_bytes
         else:
             zip_bytes = st.session_state["_zip_bytes"]
         st.download_button(
@@ -880,10 +865,7 @@ with col_dl:
             use_container_width=True,
         )
 
-filtered_stems = [
-    s for s in valid_stems
-    if not search_query or search_query.lower() in s.lower()
-]
+filtered_stems = [s for s in valid_stems if not search_query or search_query.lower() in s.lower()]
 if search_query and not filtered_stems:
     st.info(f"No images match `{search_query}`.", icon="🔍")
     st.stop()
@@ -906,7 +888,7 @@ _ICON_DL = (
     '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>'
     '<polyline points="7 10 12 15 17 10"/>'
     '<line x1="12" y1="15" x2="12" y2="3"/>'
-    '</svg>'
+    "</svg>"
 )
 
 
@@ -917,13 +899,15 @@ def _dl_float_html(img_bytes: bytes, filename: str) -> str:
     return (
         f'<div class="img-dl-float">'
         f'<a href="{data_uri}" download="{filename}" class="img-dl-btn" title="Download">'
-        f'{_ICON_DL}</a>'
-        f'</div>'
+        f"{_ICON_DL}</a>"
+        f"</div>"
     )
 
 
 # ─── 辅助：单 panel 展示（原生全屏 + 悬停下载按钮） ──────────────────────────
-def _panel(col, title: str, arr: np.ndarray, mode_l: str = "RGB", stem: str = "", cfg: str = "", img_bytes: bytes = None):
+def _panel(
+    col, title: str, arr: np.ndarray, mode_l: str = "RGB", stem: str = "", cfg: str = "", img_bytes: bytes = None
+):
     parts = [x for x in [stem, cfg.replace("/", "_").replace(" ", "_")] if x]
     fname = "_".join(parts + [title.replace(" ", "_")]) + ".png"
     with col:
@@ -939,8 +923,8 @@ with results_tab:
     for img_idx, stem in enumerate(filtered_stems):
         with st.expander(f"📷  {stem}", expanded=st.session_state.expanders_expanded):
             raw_image = all_results[stem]["_raw"]
-            h, w      = raw_image.shape[:2]
-            gt_bool   = all_gt.get(stem)
+            h, w = raw_image.shape[:2]
+            gt_bool = all_gt.get(stem)
 
             if mode == "Research" and gt_dir_input.strip() and gt_bool is None:
                 st.warning(f"未找到 `{stem}` 对应的 GT 标签文件，仅展示预测结果。", icon="⚠️")
@@ -948,7 +932,7 @@ with results_tab:
             if mode == "Research":
                 view_tab, metric_tab = st.tabs(["🖼  Prediction Views", "📊  Image Metrics"])
             else:
-                view_tab   = st.container()
+                view_tab = st.container()
                 metric_tab = None
 
             with view_tab:
@@ -964,28 +948,28 @@ with results_tab:
                         continue
 
                     probs = all_results[stem][cfg_name]["probs"]
-                    cam   = all_results[stem][cfg_name]["cam"]
+                    cam = all_results[stem][cfg_name]["cam"]
 
                     _pred_key = (stem, cfg_name, conf_threshold, overlay_alpha, heatmap_alpha)
                     if _pred_key not in _pcache:
-                        mb  = resize_mask_bool(probs >= conf_threshold, h, w)
+                        mb = resize_mask_bool(probs >= conf_threshold, h, w)
                         mu8 = mb.astype(np.uint8) * 255
-                        pb  = overlay_mask(raw_image, mb, overlay_alpha, COLOR_PRED)
-                        hm  = apply_heatmap(raw_image, cam, heatmap_alpha)
+                        pb = overlay_mask(raw_image, mb, overlay_alpha, COLOR_PRED)
+                        hm = apply_heatmap(raw_image, cam, heatmap_alpha)
                         _pcache[_pred_key] = {
-                            "mask_bool":      mb,
-                            "mask_u8":        mu8,
-                            "mask_u8_png":    pil_png_bytes(mu8, "L"),
-                            "pred_blend":     pb,
+                            "mask_bool": mb,
+                            "mask_u8": mu8,
+                            "mask_u8_png": pil_png_bytes(mu8, "L"),
+                            "pred_blend": pb,
                             "pred_blend_png": pil_png_bytes(pb),
-                            "heatmap":        hm,
-                            "heatmap_png":    pil_png_bytes(hm),
+                            "heatmap": hm,
+                            "heatmap_png": pil_png_bytes(hm),
                         }
-                    pc        = _pcache[_pred_key]
+                    pc = _pcache[_pred_key]
                     mask_bool = pc["mask_bool"]
-                    mask_u8   = pc["mask_u8"]
+                    mask_u8 = pc["mask_u8"]
                     pred_blend = pc["pred_blend"]
-                    heatmap   = pc["heatmap"]
+                    heatmap = pc["heatmap"]
 
                     if ci > 0:
                         st.markdown("---")
@@ -998,34 +982,34 @@ with results_tab:
                     if use_6:
                         _gt_key = (stem, overlay_alpha)
                         if _gt_key not in _pcache:
-                            gr  = resize_mask_bool(gt_bool, h, w)
+                            gr = resize_mask_bool(gt_bool, h, w)
                             gu8 = gr.astype(np.uint8) * 255
-                            gb  = overlay_mask(raw_image, gr, overlay_alpha, COLOR_GT)
+                            gb = overlay_mask(raw_image, gr, overlay_alpha, COLOR_GT)
                             _pcache[_gt_key] = {
-                                "gt_r":         gr,
-                                "gt_u8":        gu8,
-                                "gt_u8_png":    pil_png_bytes(gu8, "L"),
-                                "gt_blend":     gb,
+                                "gt_r": gr,
+                                "gt_u8": gu8,
+                                "gt_u8_png": pil_png_bytes(gu8, "L"),
+                                "gt_blend": gb,
                                 "gt_blend_png": pil_png_bytes(gb),
                             }
-                        gc       = _pcache[_gt_key]
-                        gt_r     = gc["gt_r"]
-                        gt_u8    = gc["gt_u8"]
+                        gc = _pcache[_gt_key]
+                        gt_r = gc["gt_r"]
+                        gt_u8 = gc["gt_u8"]
                         gt_blend = gc["gt_blend"]
 
                         c1, c2, c3, c4, c5, c6 = st.columns(6, gap="small")
-                        _panel(c1, "Original",     raw_image,  stem=stem, cfg=cfg_name, img_bytes=raw_png)
-                        _panel(c2, "GT Mask",      gt_u8,    "L", stem=stem, cfg=cfg_name, img_bytes=gc["gt_u8_png"])
-                        _panel(c3, "Pred Mask",    mask_u8,  "L", stem=stem, cfg=cfg_name, img_bytes=pc["mask_u8_png"])
-                        _panel(c4, "GT Overlay",   gt_blend,     stem=stem, cfg=cfg_name, img_bytes=gc["gt_blend_png"])
-                        _panel(c5, "Pred Overlay", pred_blend,   stem=stem, cfg=cfg_name, img_bytes=pc["pred_blend_png"])
-                        _panel(c6, "GradCAM",      heatmap,      stem=stem, cfg=cfg_name, img_bytes=pc["heatmap_png"])
+                        _panel(c1, "Original", raw_image, stem=stem, cfg=cfg_name, img_bytes=raw_png)
+                        _panel(c2, "GT Mask", gt_u8, "L", stem=stem, cfg=cfg_name, img_bytes=gc["gt_u8_png"])
+                        _panel(c3, "Pred Mask", mask_u8, "L", stem=stem, cfg=cfg_name, img_bytes=pc["mask_u8_png"])
+                        _panel(c4, "GT Overlay", gt_blend, stem=stem, cfg=cfg_name, img_bytes=gc["gt_blend_png"])
+                        _panel(c5, "Pred Overlay", pred_blend, stem=stem, cfg=cfg_name, img_bytes=pc["pred_blend_png"])
+                        _panel(c6, "GradCAM", heatmap, stem=stem, cfg=cfg_name, img_bytes=pc["heatmap_png"])
                     else:
                         c1, c2, c3, c4 = st.columns(4, gap="medium")
-                        _panel(c1, "Original",     raw_image,  stem=stem, cfg=cfg_name, img_bytes=raw_png)
-                        _panel(c2, "Pred Mask",    mask_u8,  "L", stem=stem, cfg=cfg_name, img_bytes=pc["mask_u8_png"])
-                        _panel(c3, "Pred Overlay", pred_blend,   stem=stem, cfg=cfg_name, img_bytes=pc["pred_blend_png"])
-                        _panel(c4, "GradCAM",      heatmap,      stem=stem, cfg=cfg_name, img_bytes=pc["heatmap_png"])
+                        _panel(c1, "Original", raw_image, stem=stem, cfg=cfg_name, img_bytes=raw_png)
+                        _panel(c2, "Pred Mask", mask_u8, "L", stem=stem, cfg=cfg_name, img_bytes=pc["mask_u8_png"])
+                        _panel(c3, "Pred Overlay", pred_blend, stem=stem, cfg=cfg_name, img_bytes=pc["pred_blend_png"])
+                        _panel(c4, "GradCAM", heatmap, stem=stem, cfg=cfg_name, img_bytes=pc["heatmap_png"])
 
             if mode == "Research" and metric_tab is not None:
                 with metric_tab:
@@ -1046,16 +1030,15 @@ with results_tab:
                             if _pred_key in _pcache:
                                 mask_bool = _pcache[_pred_key]["mask_bool"]
                             else:
-                                probs     = all_results[stem][cfg_name]["probs"]
+                                probs = all_results[stem][cfg_name]["probs"]
                                 mask_bool = resize_mask_bool(probs >= conf_threshold, h, w)
-                            m         = compute_metrics(mask_bool, gt_r)
+                            m = compute_metrics(mask_bool, gt_r)
                             img_model_metrics[cfg_name] = m
                             summary_metrics[cfg_name].append(m)
 
                         if img_model_metrics and selected_metrics:
                             st.markdown(
-                                f"**`{stem}` — per-model metrics** "
-                                f"(confidence threshold = {conf_threshold:.2f})"
+                                f"**`{stem}` — per-model metrics** " f"(confidence threshold = {conf_threshold:.2f})"
                             )
                             st.markdown(
                                 paper_table_html(img_model_metrics, selected_metrics),
@@ -1076,10 +1059,7 @@ if mode == "Research" and summary_tab is not None:
             avg_metrics: dict[str, dict] = {}
             for cfg_name, mlist in summary_metrics.items():
                 if mlist:
-                    avg_metrics[cfg_name] = {
-                        m: float(np.mean([ml[m] for ml in mlist]))
-                        for m in ALL_METRICS
-                    }
+                    avg_metrics[cfg_name] = {m: float(np.mean([ml[m] for ml in mlist])) for m in ALL_METRICS}
 
             if avg_metrics and selected_metrics:
                 n_imgs = max(len(v) for v in summary_metrics.values())
