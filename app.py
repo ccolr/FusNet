@@ -563,6 +563,8 @@ if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0
 if "expanders_expanded" not in st.session_state:
     st.session_state.expanders_expanded = True
+if "_panel_cache" not in st.session_state:
+    st.session_state["_panel_cache"] = {}
 
 uploaded_files = st.file_uploader(
     "Upload images",
@@ -640,6 +642,7 @@ else:
     st.session_state["_infer_key"]    = _infer_key
     st.session_state["_all_results"]  = all_results
     st.session_state["_all_gt"]       = all_gt
+    st.session_state["_panel_cache"]  = {}
 
 valid_stems = [
     s for s in all_results
@@ -666,11 +669,21 @@ with col_toggle:
         st.rerun()
 with col_dl:
     if download_types:
-        zip_bytes = build_results_zip(
-            all_results, all_gt, selected_configs,
+        _zip_cache_key = (
+            _infer_key,
             conf_threshold, overlay_alpha, heatmap_alpha,
-            download_types,
+            tuple(sorted(download_types)),
         )
+        if st.session_state.get("_zip_cache_key") != _zip_cache_key:
+            zip_bytes = build_results_zip(
+                all_results, all_gt, selected_configs,
+                conf_threshold, overlay_alpha, heatmap_alpha,
+                download_types,
+            )
+            st.session_state["_zip_cache_key"] = _zip_cache_key
+            st.session_state["_zip_bytes"]     = zip_bytes
+        else:
+            zip_bytes = st.session_state["_zip_bytes"]
         st.download_button(
             "⬇ Download ZIP",
             zip_bytes,
@@ -722,13 +735,15 @@ def _dl_float_html(img_bytes: bytes, filename: str) -> str:
 
 
 # ─── 辅助：单 panel 展示（原生全屏 + 悬停下载按钮） ──────────────────────────
-def _panel(col, title: str, arr: np.ndarray, mode_l: str = "RGB", stem: str = "", cfg: str = ""):
+def _panel(col, title: str, arr: np.ndarray, mode_l: str = "RGB", stem: str = "", cfg: str = "", img_bytes: bytes = None):
     parts = [x for x in [stem, cfg.replace("/", "_").replace(" ", "_")] if x]
     fname = "_".join(parts + [title.replace(" ", "_")]) + ".png"
     with col:
         st.markdown(f'<div class="img-card-title">{title}</div>', unsafe_allow_html=True)
         st.image(arr, use_container_width=True)
-        st.markdown(_dl_float_html(pil_png_bytes(arr, mode_l), fname), unsafe_allow_html=True)
+        if img_bytes is None:
+            img_bytes = pil_png_bytes(arr, mode_l)
+        st.markdown(_dl_float_html(img_bytes, fname), unsafe_allow_html=True)
 
 
 # ─── 展示阶段 ─────────────────────────────────────────────────────────────────
@@ -749,17 +764,40 @@ with results_tab:
                 metric_tab = None
 
             with view_tab:
+                _pcache = st.session_state["_panel_cache"]
+
+                _raw_key = ("_raw", stem)
+                if _raw_key not in _pcache:
+                    _pcache[_raw_key] = pil_png_bytes(raw_image)
+                raw_png = _pcache[_raw_key]
+
                 for ci, cfg_name in enumerate(selected_configs):
                     if cfg_name not in all_results[stem]:
                         continue
 
-                    probs     = all_results[stem][cfg_name]["probs"]
-                    cam       = all_results[stem][cfg_name]["cam"]
-                    mask_bool = resize_mask_bool(probs >= conf_threshold, h, w)
-                    mask_u8   = mask_bool.astype(np.uint8) * 255
+                    probs = all_results[stem][cfg_name]["probs"]
+                    cam   = all_results[stem][cfg_name]["cam"]
 
-                    pred_blend = overlay_mask(raw_image, mask_bool, overlay_alpha, COLOR_PRED)
-                    heatmap    = apply_heatmap(raw_image, cam, heatmap_alpha)
+                    _pred_key = (stem, cfg_name, conf_threshold, overlay_alpha, heatmap_alpha)
+                    if _pred_key not in _pcache:
+                        mb  = resize_mask_bool(probs >= conf_threshold, h, w)
+                        mu8 = mb.astype(np.uint8) * 255
+                        pb  = overlay_mask(raw_image, mb, overlay_alpha, COLOR_PRED)
+                        hm  = apply_heatmap(raw_image, cam, heatmap_alpha)
+                        _pcache[_pred_key] = {
+                            "mask_bool":      mb,
+                            "mask_u8":        mu8,
+                            "mask_u8_png":    pil_png_bytes(mu8, "L"),
+                            "pred_blend":     pb,
+                            "pred_blend_png": pil_png_bytes(pb),
+                            "heatmap":        hm,
+                            "heatmap_png":    pil_png_bytes(hm),
+                        }
+                    pc        = _pcache[_pred_key]
+                    mask_bool = pc["mask_bool"]
+                    mask_u8   = pc["mask_u8"]
+                    pred_blend = pc["pred_blend"]
+                    heatmap   = pc["heatmap"]
 
                     if ci > 0:
                         st.markdown("---")
@@ -770,23 +808,36 @@ with results_tab:
 
                     use_6 = mode == "Research" and gt_bool is not None
                     if use_6:
-                        gt_r     = resize_mask_bool(gt_bool, h, w)
-                        gt_u8    = gt_r.astype(np.uint8) * 255
-                        gt_blend = overlay_mask(raw_image, gt_r, overlay_alpha, COLOR_GT)
+                        _gt_key = (stem, overlay_alpha)
+                        if _gt_key not in _pcache:
+                            gr  = resize_mask_bool(gt_bool, h, w)
+                            gu8 = gr.astype(np.uint8) * 255
+                            gb  = overlay_mask(raw_image, gr, overlay_alpha, COLOR_GT)
+                            _pcache[_gt_key] = {
+                                "gt_r":         gr,
+                                "gt_u8":        gu8,
+                                "gt_u8_png":    pil_png_bytes(gu8, "L"),
+                                "gt_blend":     gb,
+                                "gt_blend_png": pil_png_bytes(gb),
+                            }
+                        gc       = _pcache[_gt_key]
+                        gt_r     = gc["gt_r"]
+                        gt_u8    = gc["gt_u8"]
+                        gt_blend = gc["gt_blend"]
 
                         c1, c2, c3, c4, c5, c6 = st.columns(6, gap="small")
-                        _panel(c1, "Original",     raw_image,  stem=stem, cfg=cfg_name)
-                        _panel(c2, "GT Mask",      gt_u8,    "L", stem=stem, cfg=cfg_name)
-                        _panel(c3, "Pred Mask",    mask_u8,  "L", stem=stem, cfg=cfg_name)
-                        _panel(c4, "GT Overlay",   gt_blend,     stem=stem, cfg=cfg_name)
-                        _panel(c5, "Pred Overlay", pred_blend,   stem=stem, cfg=cfg_name)
-                        _panel(c6, "GradCAM",      heatmap,      stem=stem, cfg=cfg_name)
+                        _panel(c1, "Original",     raw_image,  stem=stem, cfg=cfg_name, img_bytes=raw_png)
+                        _panel(c2, "GT Mask",      gt_u8,    "L", stem=stem, cfg=cfg_name, img_bytes=gc["gt_u8_png"])
+                        _panel(c3, "Pred Mask",    mask_u8,  "L", stem=stem, cfg=cfg_name, img_bytes=pc["mask_u8_png"])
+                        _panel(c4, "GT Overlay",   gt_blend,     stem=stem, cfg=cfg_name, img_bytes=gc["gt_blend_png"])
+                        _panel(c5, "Pred Overlay", pred_blend,   stem=stem, cfg=cfg_name, img_bytes=pc["pred_blend_png"])
+                        _panel(c6, "GradCAM",      heatmap,      stem=stem, cfg=cfg_name, img_bytes=pc["heatmap_png"])
                     else:
                         c1, c2, c3, c4 = st.columns(4, gap="medium")
-                        _panel(c1, "Original",     raw_image,  stem=stem, cfg=cfg_name)
-                        _panel(c2, "Pred Mask",    mask_u8,  "L", stem=stem, cfg=cfg_name)
-                        _panel(c3, "Pred Overlay", pred_blend,   stem=stem, cfg=cfg_name)
-                        _panel(c4, "GradCAM",      heatmap,      stem=stem, cfg=cfg_name)
+                        _panel(c1, "Original",     raw_image,  stem=stem, cfg=cfg_name, img_bytes=raw_png)
+                        _panel(c2, "Pred Mask",    mask_u8,  "L", stem=stem, cfg=cfg_name, img_bytes=pc["mask_u8_png"])
+                        _panel(c3, "Pred Overlay", pred_blend,   stem=stem, cfg=cfg_name, img_bytes=pc["pred_blend_png"])
+                        _panel(c4, "GradCAM",      heatmap,      stem=stem, cfg=cfg_name, img_bytes=pc["heatmap_png"])
 
             if mode == "Research" and metric_tab is not None:
                 with metric_tab:
@@ -799,11 +850,16 @@ with results_tab:
                         gt_r = resize_mask_bool(gt_bool, h, w)
                         img_model_metrics: dict[str, dict] = {}
 
+                        _pcache = st.session_state["_panel_cache"]
                         for cfg_name in selected_configs:
                             if cfg_name not in all_results[stem]:
                                 continue
-                            probs     = all_results[stem][cfg_name]["probs"]
-                            mask_bool = resize_mask_bool(probs >= conf_threshold, h, w)
+                            _pred_key = (stem, cfg_name, conf_threshold, overlay_alpha, heatmap_alpha)
+                            if _pred_key in _pcache:
+                                mask_bool = _pcache[_pred_key]["mask_bool"]
+                            else:
+                                probs     = all_results[stem][cfg_name]["probs"]
+                                mask_bool = resize_mask_bool(probs >= conf_threshold, h, w)
                             m         = compute_metrics(mask_bool, gt_r)
                             img_model_metrics[cfg_name] = m
                             summary_metrics[cfg_name].append(m)
