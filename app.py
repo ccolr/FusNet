@@ -121,6 +121,42 @@ st.markdown("""
   }
 
   footer { visibility: hidden; }
+
+  /* ── image download button — mirrors Streamlit's fullscreen button style ── */
+  .img-dl-float {
+    height: 0;
+    margin-top: -2.5rem;
+    padding-right: 0.5rem;
+    display: flex;
+    justify-content: flex-end;
+    position: relative;
+    z-index: 100;
+    pointer-events: none;
+    overflow: visible;
+  }
+  .img-dl-btn {
+    pointer-events: auto;
+    flex-shrink: 0;
+    width: 2rem;
+    height: 2rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(255, 255, 255, 0.8);
+    border: 1px solid rgba(49, 51, 63, 0.1);
+    border-radius: 4px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+    color: #31333f;
+    text-decoration: none;
+    opacity: 0;
+    transition: opacity 0.15s ease, background 0.1s;
+    cursor: pointer;
+  }
+  .img-dl-btn:hover { opacity: 1 !important; background: rgba(255, 255, 255, 1); }
+  /* reveal download button when hovering the adjacent stImage container */
+  .element-container:has([data-testid="stImage"]):hover + .element-container .img-dl-btn {
+    opacity: 1;
+  }
 </style>
 """, unsafe_allow_html=True)
 
@@ -661,11 +697,38 @@ else:
     summary_tab = None
 
 
-# ─── 辅助：单 panel 展示（无独立下载按钮，统一走 ZIP） ───────────────────────
-def _panel(col, title: str, arr: np.ndarray, mode_l: str = "RGB"):
+# ─── 下载按钮 SVG 图标（与 Streamlit 全屏按钮风格一致） ────────────────────
+_ICON_DL = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"'
+    ' fill="none" stroke="currentColor" stroke-width="2.2"'
+    ' stroke-linecap="round" stroke-linejoin="round">'
+    '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>'
+    '<polyline points="7 10 12 15 17 10"/>'
+    '<line x1="12" y1="15" x2="12" y2="3"/>'
+    '</svg>'
+)
+
+
+def _dl_float_html(img_bytes: bytes, filename: str) -> str:
+    """Zero-height div with download link, pulled up into the image via negative margin."""
+    b64 = base64.b64encode(img_bytes).decode()
+    data_uri = f"data:image/png;base64,{b64}"
+    return (
+        f'<div class="img-dl-float">'
+        f'<a href="{data_uri}" download="{filename}" class="img-dl-btn" title="Download">'
+        f'{_ICON_DL}</a>'
+        f'</div>'
+    )
+
+
+# ─── 辅助：单 panel 展示（原生全屏 + 悬停下载按钮） ──────────────────────────
+def _panel(col, title: str, arr: np.ndarray, mode_l: str = "RGB", stem: str = "", cfg: str = ""):
+    parts = [x for x in [stem, cfg.replace("/", "_").replace(" ", "_")] if x]
+    fname = "_".join(parts + [title.replace(" ", "_")]) + ".png"
     with col:
         st.markdown(f'<div class="img-card-title">{title}</div>', unsafe_allow_html=True)
         st.image(arr, use_container_width=True)
+        st.markdown(_dl_float_html(pil_png_bytes(arr, mode_l), fname), unsafe_allow_html=True)
 
 
 # ─── 展示阶段 ─────────────────────────────────────────────────────────────────
@@ -712,18 +775,18 @@ with results_tab:
                         gt_blend = overlay_mask(raw_image, gt_r, overlay_alpha, COLOR_GT)
 
                         c1, c2, c3, c4, c5, c6 = st.columns(6, gap="small")
-                        _panel(c1, "Original",     raw_image)
-                        _panel(c2, "GT Mask",      gt_u8,    "L")
-                        _panel(c3, "Pred Mask",    mask_u8,  "L")
-                        _panel(c4, "GT Overlay",   gt_blend)
-                        _panel(c5, "Pred Overlay", pred_blend)
-                        _panel(c6, "GradCAM",      heatmap)
+                        _panel(c1, "Original",     raw_image,  stem=stem, cfg=cfg_name)
+                        _panel(c2, "GT Mask",      gt_u8,    "L", stem=stem, cfg=cfg_name)
+                        _panel(c3, "Pred Mask",    mask_u8,  "L", stem=stem, cfg=cfg_name)
+                        _panel(c4, "GT Overlay",   gt_blend,     stem=stem, cfg=cfg_name)
+                        _panel(c5, "Pred Overlay", pred_blend,   stem=stem, cfg=cfg_name)
+                        _panel(c6, "GradCAM",      heatmap,      stem=stem, cfg=cfg_name)
                     else:
                         c1, c2, c3, c4 = st.columns(4, gap="medium")
-                        _panel(c1, "Original",     raw_image)
-                        _panel(c2, "Pred Mask",    mask_u8,  "L")
-                        _panel(c3, "Pred Overlay", pred_blend)
-                        _panel(c4, "GradCAM",      heatmap)
+                        _panel(c1, "Original",     raw_image,  stem=stem, cfg=cfg_name)
+                        _panel(c2, "Pred Mask",    mask_u8,  "L", stem=stem, cfg=cfg_name)
+                        _panel(c3, "Pred Overlay", pred_blend,   stem=stem, cfg=cfg_name)
+                        _panel(c4, "GradCAM",      heatmap,      stem=stem, cfg=cfg_name)
 
             if mode == "Research" and metric_tab is not None:
                 with metric_tab:
@@ -791,12 +854,7 @@ if mode == "Research" and summary_tab is not None:
                 with sum_tab2:
                     chart_bytes = metrics_barchart_png(avg_metrics, selected_metrics)
                     st.image(chart_bytes, use_container_width=True)
-                    _, col_dl_chart = st.columns([6, 1])
-                    with col_dl_chart:
-                        st.download_button(
-                            "⬇ Download",
-                            chart_bytes,
-                            "fusnet_metrics_chart.png",
-                            "image/png",
-                            use_container_width=True,
-                        )
+                    st.markdown(
+                        _dl_float_html(chart_bytes, "fusnet_metrics_chart.png"),
+                        unsafe_allow_html=True,
+                    )
