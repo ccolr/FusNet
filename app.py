@@ -245,44 +245,54 @@ def paper_table_html(model_metrics: dict, metrics: list) -> str:
 def metrics_barchart_png(model_metrics: dict, metrics: list) -> bytes:
     models  = list(model_metrics.keys())
     n_m, nc = len(metrics), len(models)
-    x       = np.arange(n_m)
-    bw      = min(0.65 / max(nc, 1), 0.28)
+    y       = np.arange(n_m)
+    bw      = min(0.65 / max(nc, 1), 0.25)
     offsets = (np.arange(nc) - (nc - 1) / 2) * bw
     cmap    = plt.get_cmap("tab10").colors  # type: ignore
 
-    fig, ax = plt.subplots(figsize=(max(7, n_m * 2.0), 4.5), dpi=150)
+    fig_h = max(5.5, n_m * 0.8 + nc * 0.5 + 1.5)
+    fig, ax = plt.subplots(figsize=(10, fig_h), dpi=180)
     fig.patch.set_facecolor("white")
     ax.set_facecolor("white")
 
+    all_vals = [model_metrics[mn].get(m, 0) for mn in models for m in metrics]
+    xmax = min(1.15, max(all_vals, default=0) + 0.10)
+
     for i, (mn, off) in enumerate(zip(models, offsets)):
         vals = [model_metrics[mn].get(m, 0) for m in metrics]
-        bars = ax.bar(x + off, vals, bw * 0.90,
-                      label=mn, color=cmap[i % 10],
-                      edgecolor="white", linewidth=0.6)
+        bars = ax.barh(y + off, vals, bw * 0.90,
+                       label=mn, color=cmap[i % 10],
+                       edgecolor="white", linewidth=0.6)
         for b, v in zip(bars, vals):
             ax.text(
-                b.get_x() + b.get_width() / 2,
-                b.get_height() + 0.007,
+                min(b.get_width() + 0.005, xmax - 0.002),
+                b.get_y() + b.get_height() / 2,
                 f"{v:.3f}",
-                ha="center", va="bottom", fontsize=7,
+                ha="left", va="center", fontsize=8,
             )
 
-    ax.set_xticks(x)
-    ax.set_xticklabels(metrics, fontsize=10)
-    ax.set_ylabel("Score", fontsize=10)
+    ax.set_yticks(y)
+    ax.set_yticklabels(metrics, fontsize=11)
+    ax.invert_yaxis()
+    ax.set_xlabel("Score", fontsize=11)
+    ax.set_xlim(0, xmax)
 
-    all_vals = [model_metrics[mn].get(m, 0) for mn in models for m in metrics]
-    ymax = min(1.22, max(all_vals, default=0) + 0.18)
-    ax.set_ylim(0, ymax)
-
-    ax.yaxis.grid(True, linestyle="--", linewidth=0.5, alpha=0.55, color="#aaa")
+    ax.xaxis.grid(True, linestyle="--", linewidth=0.5, alpha=0.55, color="#aaa")
     ax.set_axisbelow(True)
     for spine in ("top", "right"):
         ax.spines[spine].set_visible(False)
     ax.spines["left"].set_linewidth(0.8)
     ax.spines["bottom"].set_linewidth(0.8)
-    ax.legend(fontsize=8.5, framealpha=0.95, loc="upper right")
-    plt.tight_layout(pad=1.2)
+
+    legend_ncol = min(nc, 5)
+    ax.legend(
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.10),
+        ncol=legend_ncol,
+        fontsize=9.5,
+        framealpha=0.95,
+        edgecolor="#ccc",
+    )
 
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches="tight", facecolor="white")
@@ -780,6 +790,13 @@ if mode == "Research" and summary_tab is not None:
 
                 with sum_tab2:
                     chart_bytes = metrics_barchart_png(avg_metrics, selected_metrics)
-                    _, col_chart, _ = st.columns([1, 6, 1])
-                    with col_chart:
-                        st.image(chart_bytes, use_container_width=True)
+                    st.image(chart_bytes, use_container_width=True)
+                    _, col_dl_chart = st.columns([6, 1])
+                    with col_dl_chart:
+                        st.download_button(
+                            "⬇ Download",
+                            chart_bytes,
+                            "fusnet_metrics_chart.png",
+                            "image/png",
+                            use_container_width=True,
+                        )
