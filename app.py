@@ -99,6 +99,27 @@ st.markdown("""
   .paper-table tbody tr:last-child td { border-bottom: 2.5px solid #111; }
   .paper-table .best { font-weight: 800; }
 
+  /* ── outer tab-list: center all tab buttons ── */
+  [data-baseweb="tab-list"] {
+    justify-content: center;
+  }
+  /* ── inner tab-lists: keep left-aligned ── */
+  [data-baseweb="tab-panel"] [data-baseweb="tab-list"] {
+    justify-content: flex-start;
+  }
+  /* ── outer tabs only: bold, slightly larger ── */
+  [data-baseweb="tab"] {
+    font-size: 1.05rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+  }
+  /* ── inner tabs (inside a tab-panel): revert to defaults ── */
+  [data-baseweb="tab-panel"] [data-baseweb="tab"] {
+    font-size: revert;
+    font-weight: revert;
+    letter-spacing: revert;
+  }
+
   footer { visibility: hidden; }
 </style>
 """, unsafe_allow_html=True)
