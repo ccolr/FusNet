@@ -494,6 +494,8 @@ st.caption(
 
 if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0
+if "expanders_expanded" not in st.session_state:
+    st.session_state.expanders_expanded = True
 
 uploaded_files = st.file_uploader(
     "Upload images",
@@ -566,14 +568,19 @@ if not valid_stems:
 n_done = sum(1 for s in valid_stems for c in selected_configs if c in all_results[s])
 st.success(f"Done — {len(valid_stems)} image(s), {n_done} inference(s) completed.", icon="✅")
 
-# ─── 搜索 + 全局下载 ──────────────────────────────────────────────────────────
-col_search, col_dl = st.columns([3, 1])
+# ─── 搜索 + 折叠控制 + 全局下载 ──────────────────────────────────────────────
+col_search, col_toggle, col_dl = st.columns([3, 1, 1])
 with col_search:
     search_query = st.text_input(
         "search",
         placeholder="🔍  Filter images by filename…",
         label_visibility="collapsed",
     )
+with col_toggle:
+    toggle_label = "⊖ Collapse All" if st.session_state.expanders_expanded else "⊕ Expand All"
+    if st.button(toggle_label, use_container_width=True):
+        st.session_state.expanders_expanded = not st.session_state.expanders_expanded
+        st.rerun()
 with col_dl:
     if download_types:
         zip_bytes = build_results_zip(
@@ -617,7 +624,7 @@ def _panel(col, title: str, arr: np.ndarray, mode_l: str = "RGB"):
 # ─── 展示阶段 ─────────────────────────────────────────────────────────────────
 with results_tab:
     for img_idx, stem in enumerate(filtered_stems):
-        with st.expander(f"📷  {stem}", expanded=True):
+        with st.expander(f"📷  {stem}", expanded=st.session_state.expanders_expanded):
             raw_image = all_results[stem]["_raw"]
             h, w      = raw_image.shape[:2]
             gt_bool   = all_gt.get(stem)
