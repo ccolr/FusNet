@@ -13,8 +13,11 @@ app.py  ──  FusNet Web Demo v2（远程推理客户端）
 """
 
 import base64
+import hashlib
 import io
+import json
 import os
+import shutil
 import zipfile
 from pathlib import Path
 from typing import Optional
@@ -168,6 +171,79 @@ ALL_METRICS = ["Precision", "Recall", "F1", "IoU", "mIoU", "Accuracy"]
 
 PANEL_NAMES_DEFAULT  = ["Original", "Pred_Mask", "Pred_Overlay", "GradCAM"]
 PANEL_NAMES_RESEARCH = ["Original", "GT_Mask", "Pred_Mask", "GT_Overlay", "Pred_Overlay", "GradCAM"]
+
+# ─── 磁盘缓存工具 ─────────────────────────────────────────────────────────────
+_DISK_CACHE_DIR = Path(".fusnet_session")
+
+def _fhash(name: str, size: int) -> str:
+    return hashlib.md5(f"{name}:{size}".encode()).hexdigest()[:12]
+
+def _chash(cfg: str) -> str:
+    return hashlib.md5(cfg.encode()).hexdigest()[:8]
+
+def _save_sidebar(state: dict):
+    try:
+        _DISK_CACHE_DIR.mkdir(exist_ok=True)
+        (_DISK_CACHE_DIR / "sidebar.json").write_text(json.dumps(state))
+    except Exception:
+        pass
+
+def _load_sidebar() -> dict:
+    p = _DISK_CACHE_DIR / "sidebar.json"
+    try:
+        return json.loads(p.read_text()) if p.exists() else {}
+    except Exception:
+        return {}
+
+def _save_stems_meta(stems: list):
+    try:
+        _DISK_CACHE_DIR.mkdir(exist_ok=True)
+        (_DISK_CACHE_DIR / "stems.json").write_text(json.dumps(stems))
+    except Exception:
+        pass
+
+def _load_stems_meta() -> list:
+    p = _DISK_CACHE_DIR / "stems.json"
+    try:
+        return json.loads(p.read_text()) if p.exists() else []
+    except Exception:
+        return []
+
+def _save_image_cache(name: str, size: int, arr: np.ndarray):
+    d = _DISK_CACHE_DIR / "images"
+    d.mkdir(parents=True, exist_ok=True)
+    np.save(d / f"{_fhash(name, size)}.npy", arr)
+
+def _load_image_cache(name: str, size: int) -> Optional[np.ndarray]:
+    p = _DISK_CACHE_DIR / "images" / f"{_fhash(name, size)}.npy"
+    return np.load(p) if p.exists() else None
+
+def _save_result_cache(name: str, size: int, cfg: str, probs: np.ndarray, cam: np.ndarray):
+    d = _DISK_CACHE_DIR / "results"
+    d.mkdir(parents=True, exist_ok=True)
+    np.savez(d / f"{_fhash(name, size)}_{_chash(cfg)}.npz", probs=probs, cam=cam)
+
+def _load_result_cache(name: str, size: int, cfg: str) -> Optional[dict]:
+    p = _DISK_CACHE_DIR / "results" / f"{_fhash(name, size)}_{_chash(cfg)}.npz"
+    if not p.exists():
+        return None
+    d = np.load(p)
+    return {"probs": d["probs"], "cam": d["cam"]}
+
+def _save_gt_cache(name: str, size: int, gt: Optional[np.ndarray]):
+    if gt is None:
+        return
+    d = _DISK_CACHE_DIR / "gt"
+    d.mkdir(parents=True, exist_ok=True)
+    np.save(d / f"{_fhash(name, size)}.npy", gt.astype(np.uint8))
+
+def _load_gt_cache(name: str, size: int) -> Optional[np.ndarray]:
+    p = _DISK_CACHE_DIR / "gt" / f"{_fhash(name, size)}.npy"
+    return np.load(p).astype(bool) if p.exists() else None
+
+def _clear_disk_cache():
+    if _DISK_CACHE_DIR.exists():
+        shutil.rmtree(_DISK_CACHE_DIR)
 
 
 # ─── 图像工具 ─────────────────────────────────────────────────────────────────
@@ -454,6 +530,12 @@ def build_results_zip(
     return buf.getvalue()
 
 
+# ─── 从磁盘恢复 sidebar 状态（每个浏览器会话只初始化一次） ─────────────────────
+if "_sb_initialized" not in st.session_state:
+    for _k, _v in _load_sidebar().items():
+        st.session_state[_k] = _v
+    st.session_state["_sb_initialized"] = True
+
 # ─── 侧边栏 ───────────────────────────────────────────────────────────────────
 selected_metrics: list = ALL_METRICS[:]
 gt_dir_input:     str  = ""
@@ -468,6 +550,7 @@ with st.sidebar:
     mode = st.radio(
         "Mode",
         ["Default", "Research"],
+        key="sb_mode",
         horizontal=True,
         help="Default: 多模型预测  ·  Research: 含 GT 对比与指标",
     )
@@ -476,6 +559,7 @@ with st.sidebar:
     server_url = st.text_input(
         "Inference server URL",
         value="http://localhost:8000",
+        key="sb_server_url",
         help="远端 server.py 的地址。SSH 端口转发后填 http://localhost:<port>",
     ).rstrip("/")
 
@@ -495,10 +579,17 @@ with st.sidebar:
     if not server_configs:
         st.warning("无法获取服务器配置", icon="⚠️")
     else:
+        # 过滤缓存的选择项，确保只保留当前服务器提供的配置
+        if "sb_selected_configs" in st.session_state:
+            st.session_state["sb_selected_configs"] = [
+                c for c in st.session_state["sb_selected_configs"] if c in all_names
+            ]
+        _cfg_default = st.session_state.get("sb_selected_configs", avail_names[:1] if avail_names else [])
         selected_configs = st.multiselect(
             "Network configurations",
             all_names,
-            default=avail_names[:1] if avail_names else [],
+            default=_cfg_default,
+            key="sb_selected_configs",
             help="可同时选多个模型推理并对比结果",
         )
         for n in selected_configs:
@@ -511,19 +602,27 @@ with st.sidebar:
     conf_threshold = st.slider(
         "Confidence threshold",
         0.0, 1.0, 0.5, 0.01,
+        key="sb_conf_threshold",
         help="像素判定为竹林的概率下限，调节不重新推理（本地实时计算）",
     )
     heatmap_alpha = st.slider("Heatmap blend α", 0.1, 0.9, 0.5,  0.05,
+                              key="sb_heatmap_alpha",
                               help="热力图与原图混合比例")
     overlay_alpha = st.slider("Mask overlay α",  0.1, 0.9, 0.45, 0.05,
+                              key="sb_overlay_alpha",
                               help="掩码叠加层不透明度")
 
     st.divider()
     _all_panel_names = PANEL_NAMES_RESEARCH if mode == "Research" else PANEL_NAMES_DEFAULT
+    if "sb_download_types" in st.session_state:
+        st.session_state["sb_download_types"] = [
+            t for t in st.session_state["sb_download_types"] if t in _all_panel_names
+        ]
     download_types = st.multiselect(
         "Download image types",
         _all_panel_names,
-        default=_all_panel_names,
+        default=st.session_state.get("sb_download_types", _all_panel_names),
+        key="sb_download_types",
         help="选择 ZIP 下载时包含的图片类型，结构为 模型/类型/图片.png",
     )
     if not download_types:
@@ -535,16 +634,35 @@ with st.sidebar:
         gt_dir_input = st.text_input(
             "Ground Truth folder (server path)",
             placeholder="/absolute/path/on/server/labels",
+            key="sb_gt_dir_input",
             help="运行 server.py 的服务端机器上的标签文件夹绝对路径。",
         )
+        if "sb_selected_metrics" in st.session_state:
+            st.session_state["sb_selected_metrics"] = [
+                m for m in st.session_state["sb_selected_metrics"] if m in ALL_METRICS
+            ]
         selected_metrics = st.multiselect(
             "Metrics to display",
             ALL_METRICS,
-            default=ALL_METRICS,
+            default=st.session_state.get("sb_selected_metrics", ALL_METRICS),
+            key="sb_selected_metrics",
             help="选择在表格和图表中展示的指标",
         )
         if not selected_metrics:
             selected_metrics = ALL_METRICS[:]
+
+    # 每次渲染后将当前 sidebar 状态写入磁盘，供刷新后恢复
+    _save_sidebar({
+        "sb_mode":             mode,
+        "sb_server_url":       server_url,
+        "sb_selected_configs": selected_configs,
+        "sb_conf_threshold":   conf_threshold,
+        "sb_heatmap_alpha":    heatmap_alpha,
+        "sb_overlay_alpha":    overlay_alpha,
+        "sb_download_types":   download_types,
+        "sb_gt_dir_input":     gt_dir_input if mode == "Research" else "",
+        "sb_selected_metrics": selected_metrics if mode == "Research" else list(ALL_METRICS),
+    })
 
 
 # ─── 主内容区 ─────────────────────────────────────────────────────────────────
@@ -566,6 +684,9 @@ if "expanders_expanded" not in st.session_state:
 if "_panel_cache" not in st.session_state:
     st.session_state["_panel_cache"] = {}
 
+# 读取磁盘缓存元数据（早于 uploader，用于判断是否可以免上传恢复）
+_disk_stems = _load_stems_meta()
+
 uploaded_files = st.file_uploader(
     "Upload images",
     type=["tif", "tiff", "png", "jpg", "jpeg"],
@@ -574,75 +695,140 @@ uploaded_files = st.file_uploader(
     key=f"up_{st.session_state.uploader_key}",
 )
 
+_use_disk_cache = not uploaded_files and bool(_disk_stems)
+
 if uploaded_files and st.button("Clear all", icon="🗑️"):
+    _clear_disk_cache()
     st.session_state.uploader_key += 1
+    st.session_state.pop("_infer_key", None)
     st.rerun()
 
-if not uploaded_files:
+if _use_disk_cache and st.button("清除缓存", icon="🗑️", help="清除刷新保留的缓存，回到初始状态"):
+    _clear_disk_cache()
+    st.session_state.pop("_infer_key", None)
+    st.rerun()
+
+if not uploaded_files and not _use_disk_cache:
     st.info("👆 Upload at least one image to get started.", icon="ℹ️")
     st.stop()
 
-if not health:
-    st.error("推理服务器不可达，请先启动 `server.py` 并确认端口转发。", icon="🚨")
-    st.stop()
+# ─── 推理 / 磁盘缓存恢复 ──────────────────────────────────────────────────────
+all_results: dict[str, dict]                 = {}
+all_gt:      dict[str, Optional[np.ndarray]] = {}
 
-if not selected_configs:
-    st.error("请在侧边栏选择至少一个模型配置。", icon="🚨")
-    st.stop()
-
-# ─── 推理阶段 ─────────────────────────────────────────────────────────────────
-_infer_key = (
-    st.session_state.uploader_key,
-    tuple((f.name, f.size) for f in uploaded_files),
-    tuple(sorted(selected_configs)),
-    mode,
-    gt_dir_input.strip() if mode == "Research" else "",
-)
-
-if st.session_state.get("_infer_key") == _infer_key:
-    all_results: dict[str, dict]                 = st.session_state["_all_results"]
-    all_gt:      dict[str, Optional[np.ndarray]] = st.session_state["_all_gt"]
-else:
-    all_results = {}
-    all_gt      = {}
-
-    n_total  = len(uploaded_files) * len(selected_configs)
-    progress = st.progress(0, text="Sending to inference server…")
-    task_idx = 0
-
-    for uf in uploaded_files:
-        raw_bytes = uf.read()
-        image     = read_image_bytes(raw_bytes, uf.name)
-        stem      = Path(uf.name).stem
-
-        all_results[stem] = {"_raw": image}
-
-        if mode == "Research" and gt_dir_input.strip():
-            all_gt[stem] = call_gt_api(server_url, gt_dir_input.strip(), stem)
-
-        for cfg_name in selected_configs:
-            task_idx += 1
-            progress.progress(task_idx / n_total, text=f"Inferring {uf.name} [{cfg_name}]…")
-
-            if not server_configs.get(cfg_name, {}).get("weight_available", False):
-                st.warning(f"`{cfg_name}` — weight not found on server, skipped.", icon="⚠️")
+if _use_disk_cache:
+    # 从磁盘缓存恢复所有结果，无需服务器在线
+    _cache_key = ("disk", tuple(sm["stem"] for sm in _disk_stems))
+    if st.session_state.get("_infer_key") == _cache_key:
+        all_results = st.session_state["_all_results"]
+        all_gt      = st.session_state["_all_gt"]
+    else:
+        for sm in _disk_stems:
+            img = _load_image_cache(sm["name"], sm["size"])
+            if img is None:
                 continue
+            stem = sm["stem"]
+            all_results[stem] = {"_raw": img}
+            for cfg in sm.get("configs", []):
+                r = _load_result_cache(sm["name"], sm["size"], cfg)
+                if r:
+                    all_results[stem][cfg] = r
+            gt = _load_gt_cache(sm["name"], sm["size"])
+            if gt is not None:
+                all_gt[stem] = gt
+        st.session_state["_infer_key"]   = _cache_key
+        st.session_state["_all_results"] = all_results
+        st.session_state["_all_gt"]      = all_gt
+        st.session_state["_panel_cache"] = {}
 
-            ikey = f"{cfg_name}::{uf.name}::{uf.size}"
-            try:
-                probs, cam = call_infer_api(server_url, cfg_name, ikey, raw_bytes, uf.name)
-                all_results[stem][cfg_name] = {"probs": probs, "cam": cam}
-            except requests.HTTPError as e:
-                st.error(f"**{uf.name}** [{cfg_name}] 服务器错误: {e.response.text}", icon="🚨")
-            except Exception as e:
-                st.error(f"**{uf.name}** [{cfg_name}] 请求失败: {e}", icon="🚨")
+    # 若 sidebar 没选模型，回退到缓存中存在的模型列表
+    if not selected_configs:
+        selected_configs = list(dict.fromkeys(
+            cfg for sm in _disk_stems for cfg in sm.get("configs", [])
+        ))
 
-    progress.empty()
+    st.info("💾 显示缓存结果（上次推理）。上传新图片可重新推理。", icon="💾")
 
-    st.session_state["_infer_key"]    = _infer_key
-    st.session_state["_all_results"]  = all_results
-    st.session_state["_all_gt"]       = all_gt
-    st.session_state["_panel_cache"]  = {}
+else:
+    # 新上传文件：检查服务器与模型选择
+    if not health:
+        st.error("推理服务器不可达，请先启动 `server.py` 并确认端口转发。", icon="🚨")
+        st.stop()
+
+    if not selected_configs:
+        st.error("请在侧边栏选择至少一个模型配置。", icon="🚨")
+        st.stop()
+
+    _infer_key = (
+        st.session_state.uploader_key,
+        tuple((f.name, f.size) for f in uploaded_files),
+        tuple(sorted(selected_configs)),
+        mode,
+        gt_dir_input.strip() if mode == "Research" else "",
+    )
+
+    if st.session_state.get("_infer_key") == _infer_key:
+        all_results = st.session_state["_all_results"]
+        all_gt      = st.session_state["_all_gt"]
+    else:
+        n_total  = len(uploaded_files) * len(selected_configs)
+        progress = st.progress(0, text="Sending to inference server…")
+        task_idx = 0
+
+        for uf in uploaded_files:
+            raw_bytes = uf.read()
+            image     = read_image_bytes(raw_bytes, uf.name)
+            stem      = Path(uf.name).stem
+
+            all_results[stem] = {"_raw": image}
+
+            if mode == "Research" and gt_dir_input.strip():
+                all_gt[stem] = call_gt_api(server_url, gt_dir_input.strip(), stem)
+
+            for cfg_name in selected_configs:
+                task_idx += 1
+                progress.progress(task_idx / n_total, text=f"Inferring {uf.name} [{cfg_name}]…")
+
+                if not server_configs.get(cfg_name, {}).get("weight_available", False):
+                    st.warning(f"`{cfg_name}` — weight not found on server, skipped.", icon="⚠️")
+                    continue
+
+                ikey = f"{cfg_name}::{uf.name}::{uf.size}"
+                try:
+                    probs, cam = call_infer_api(server_url, cfg_name, ikey, raw_bytes, uf.name)
+                    all_results[stem][cfg_name] = {"probs": probs, "cam": cam}
+                except requests.HTTPError as e:
+                    st.error(f"**{uf.name}** [{cfg_name}] 服务器错误: {e.response.text}", icon="🚨")
+                except Exception as e:
+                    st.error(f"**{uf.name}** [{cfg_name}] 请求失败: {e}", icon="🚨")
+
+        progress.empty()
+
+        # 推理完成后写入磁盘缓存（与已有缓存合并）
+        _existing_meta = {sm["stem"]: sm for sm in _load_stems_meta()}
+        for uf in uploaded_files:
+            stem = Path(uf.name).stem
+            if stem not in all_results:
+                continue
+            _save_image_cache(uf.name, uf.size, all_results[stem]["_raw"])
+            cfg_list = []
+            for cfg in selected_configs:
+                if cfg in all_results[stem]:
+                    _save_result_cache(uf.name, uf.size, cfg,
+                                       all_results[stem][cfg]["probs"],
+                                       all_results[stem][cfg]["cam"])
+                    cfg_list.append(cfg)
+            gt = all_gt.get(stem)
+            if gt is not None:
+                _save_gt_cache(uf.name, uf.size, gt)
+            _existing_meta[stem] = {"stem": stem, "name": uf.name,
+                                     "size": uf.size, "configs": cfg_list}
+        _save_stems_meta(list(_existing_meta.values()))
+
+        st.session_state["_infer_key"]   = _infer_key
+        st.session_state["_all_results"] = all_results
+        st.session_state["_all_gt"]      = all_gt
+        st.session_state["_panel_cache"] = {}
 
 valid_stems = [
     s for s in all_results
@@ -670,7 +856,7 @@ with col_toggle:
 with col_dl:
     if download_types:
         _zip_cache_key = (
-            _infer_key,
+            st.session_state.get("_infer_key"),
             conf_threshold, overlay_alpha, heatmap_alpha,
             tuple(sorted(download_types)),
         )
