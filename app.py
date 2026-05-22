@@ -3,7 +3,7 @@ app.py  ──  FusNet Web Demo v2（远程推理客户端）
 ================================================
 模式：
   • Default  — 多模型预测，每张图 N 组 4-panel（原图 / 预测掩码 / 叠加 / GradCAM）
-  • Research — 指定 GT 文件夹，6-panel + 逐图指标表 + 总体对比表与柱状图
+  • Research — 指定服务端 GT 文件夹，6-panel + 逐图指标表 + 汇总对比表与柱状图
 
 启动：
     streamlit run app.py
@@ -69,7 +69,8 @@ st.markdown("""
     margin: 2.2rem 0 1.6rem;
   }
 
-  /* ── paper-style table (booktabs) ── */
+  /* ── paper-style table (booktabs, centered) ── */
+  .paper-table-wrap { display: flex; justify-content: center; }
   .paper-table {
     border-collapse: collapse;
     width: auto;
@@ -104,9 +105,12 @@ st.markdown("""
 
 # ─── 常量 ─────────────────────────────────────────────────────────────────────
 COLOR_PRED  = (220, 30,  30)   # red overlay for predictions
-COLOR_GT    = (30,  160, 30)   # green overlay for GT
+COLOR_GT    = (220, 30,  30)   # red overlay for GT (same as prediction)
 IMAGE_EXTS  = {".tif", ".tiff", ".png", ".jpg", ".jpeg"}
-ALL_METRICS = ["Precision", "Recall", "F1", "IoU", "mIoU"]
+ALL_METRICS = ["Precision", "Recall", "F1", "IoU", "mIoU", "Accuracy"]
+
+PANEL_NAMES_DEFAULT  = ["Original", "Pred_Mask", "Pred_Overlay", "GradCAM"]
+PANEL_NAMES_RESEARCH = ["Original", "GT_Mask", "Pred_Mask", "GT_Overlay", "Pred_Overlay", "GradCAM"]
 
 
 # ─── 图像工具 ─────────────────────────────────────────────────────────────────
@@ -126,19 +130,6 @@ def read_image_bytes(data: bytes, filename: str) -> np.ndarray:
             arr = arr[:, :, :3]
         return arr
     return np.array(Image.open(io.BytesIO(data)).convert("RGB"), dtype=np.uint8)
-
-
-def read_gt_mask(path: Path) -> Optional[np.ndarray]:
-    try:
-        if path.suffix.lower() in (".tif", ".tiff"):
-            import rasterio
-            with rasterio.open(str(path)) as src:
-                arr = src.read(1)
-        else:
-            arr = np.array(Image.open(str(path)).convert("L"))
-        return arr > 0 if arr.max() <= 1 else arr > 127
-    except Exception:
-        return None
 
 
 def pil_png_bytes(arr: np.ndarray, mode: str = "RGB") -> bytes:
@@ -185,39 +176,6 @@ def resize_mask_bool(mask: np.ndarray, h: int, w: int) -> np.ndarray:
     )
 
 
-# ─── 模糊 GT 文件匹配 ────────────────────────────────────────────────────────
-def _lcs_len(a: str, b: str) -> int:
-    """最长公共子串长度（大小写不敏感）。"""
-    a, b = a.lower(), b.lower()
-    prev = [0] * (len(b) + 1)
-    best = 0
-    for ca in a:
-        curr = [0] * (len(b) + 1)
-        for j, cb in enumerate(b, 1):
-            if ca == cb:
-                curr[j] = prev[j - 1] + 1
-                if curr[j] > best:
-                    best = curr[j]
-        prev = curr
-    return best
-
-
-def find_gt_file(stem: str, gt_dir: Path) -> Optional[Path]:
-    """
-    在 gt_dir 中找与 stem 最相似的文件。
-    最长公共子串 / min(len_a, len_b) >= 0.6 才认为匹配成功。
-    """
-    best_f, best_r = None, 0.0
-    for f in gt_dir.iterdir():
-        if f.suffix.lower() not in IMAGE_EXTS:
-            continue
-        lcs   = _lcs_len(stem, f.stem)
-        ratio = lcs / max(min(len(stem), len(f.stem)), 1)
-        if ratio > best_r:
-            best_r, best_f = ratio, f
-    return best_f if best_r >= 0.6 else None
-
-
 # ─── 指标计算 ─────────────────────────────────────────────────────────────────
 def compute_metrics(pred: np.ndarray, gt: np.ndarray) -> dict:
     p, g = pred.astype(bool).ravel(), gt.astype(bool).ravel()
@@ -234,10 +192,11 @@ def compute_metrics(pred: np.ndarray, gt: np.ndarray) -> dict:
         "F1":        2 * tp / (2 * tp + fp + fn + eps),
         "IoU":       iou_fg,
         "mIoU":      (iou_fg + iou_bg) / 2,
+        "Accuracy":  (tp + tn) / (tp + fp + fn + tn + eps),
     }
 
 
-# ─── 论文级 HTML 表格（booktabs 风格） ───────────────────────────────────────
+# ─── 论文级 HTML 表格（booktabs 风格，居中） ──────────────────────────────────
 def paper_table_html(model_metrics: dict, metrics: list) -> str:
     if not model_metrics or not metrics:
         return ""
@@ -254,7 +213,11 @@ def paper_table_html(model_metrics: dict, metrics: list) -> str:
             cls = ' class="best"' if mn == best[m] else ""
             cells += f"<td{cls}>{v:.4f}</td>"
         rows += f"<tr><td>{mn}</td>{cells}</tr>"
-    return f'<table class="paper-table">{header}<tbody>{rows}</tbody></table>'
+    return (
+        f'<div class="paper-table-wrap">'
+        f'<table class="paper-table">{header}<tbody>{rows}</tbody></table>'
+        f'</div>'
+    )
 
 
 # ─── 论文级柱状图 ─────────────────────────────────────────────────────────────
@@ -306,7 +269,7 @@ def metrics_barchart_png(model_metrics: dict, metrics: list) -> bytes:
     return buf.getvalue()
 
 
-# ─── API 调用（缓存：同图+同模型不重复请求；滑块变化只触发本地计算） ──────────
+# ─── API 调用 ─────────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def call_infer_api(
     server_url:  str,
@@ -332,6 +295,26 @@ def call_infer_api(
     return probs, cam
 
 
+@st.cache_data(show_spinner=False)
+def call_gt_api(server_url: str, gt_dir: str, stem: str) -> Optional[np.ndarray]:
+    """Request GT mask from server; returns bool ndarray or None if not found."""
+    try:
+        r = requests.get(
+            f"{server_url}/gt",
+            params={"gt_dir": gt_dir, "stem": stem},
+            timeout=30,
+        )
+        if r.status_code == 200:
+            d    = r.json()
+            mask = np.frombuffer(
+                base64.b64decode(d["mask"]), dtype=np.uint8
+            ).reshape(tuple(d["shape"]))
+            return mask.astype(bool)
+    except Exception:
+        pass
+    return None
+
+
 @st.cache_data(show_spinner=False, ttl=30)
 def fetch_server_configs(server_url: str) -> Optional[dict]:
     try:
@@ -351,10 +334,64 @@ def check_health(server_url: str) -> Optional[dict]:
         return None
 
 
+# ─── ZIP 构建 ─────────────────────────────────────────────────────────────────
+def build_results_zip(
+    all_results:      dict,
+    all_gt:           dict,
+    selected_configs: list,
+    conf_threshold:   float,
+    overlay_alpha:    float,
+    heatmap_alpha:    float,
+    download_types:   list,
+) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for stem in all_results:
+            raw_image = all_results[stem]["_raw"]
+            h, w      = raw_image.shape[:2]
+            gt_bool   = all_gt.get(stem)
+
+            for cfg_name in selected_configs:
+                if cfg_name not in all_results[stem]:
+                    continue
+                probs      = all_results[stem][cfg_name]["probs"]
+                cam        = all_results[stem][cfg_name]["cam"]
+                mask_bool  = resize_mask_bool(probs >= conf_threshold, h, w)
+                mask_u8    = mask_bool.astype(np.uint8) * 255
+                pred_blend = overlay_mask(raw_image, mask_bool, overlay_alpha, COLOR_PRED)
+                heatmap    = apply_heatmap(raw_image, cam, heatmap_alpha)
+
+                safe_cfg = cfg_name.replace("/", "_").replace(" ", "_")
+
+                panels: dict[str, tuple[np.ndarray, str]] = {
+                    "Original":     (raw_image,  "RGB"),
+                    "Pred_Mask":    (mask_u8,    "L"),
+                    "Pred_Overlay": (pred_blend, "RGB"),
+                    "GradCAM":      (heatmap,    "RGB"),
+                }
+                if gt_bool is not None:
+                    gt_r  = resize_mask_bool(gt_bool, h, w)
+                    gt_u8 = gt_r.astype(np.uint8) * 255
+                    gt_blend = overlay_mask(raw_image, gt_r, overlay_alpha, COLOR_GT)
+                    panels["GT_Mask"]    = (gt_u8,    "L")
+                    panels["GT_Overlay"] = (gt_blend, "RGB")
+
+                for panel_name, (arr, mode_l) in panels.items():
+                    if panel_name not in download_types:
+                        continue
+                    zf.writestr(
+                        f"{safe_cfg}/{panel_name}/{stem}.png",
+                        pil_png_bytes(arr, mode=mode_l),
+                    )
+    buf.seek(0)
+    return buf.getvalue()
+
+
 # ─── 侧边栏 ───────────────────────────────────────────────────────────────────
 selected_metrics: list = ALL_METRICS[:]
-gt_dir_input: str = ""
+gt_dir_input:     str  = ""
 selected_configs: list = []
+download_types:   list = []
 
 with st.sidebar:
     st.markdown("## 🌿 FusNet")
@@ -414,13 +451,24 @@ with st.sidebar:
     overlay_alpha = st.slider("Mask overlay α",  0.1, 0.9, 0.45, 0.05,
                               help="掩码叠加层不透明度")
 
+    st.divider()
+    _all_panel_names = PANEL_NAMES_RESEARCH if mode == "Research" else PANEL_NAMES_DEFAULT
+    download_types = st.multiselect(
+        "Download image types",
+        _all_panel_names,
+        default=_all_panel_names,
+        help="选择 ZIP 下载时包含的图片类型，结构为 模型/类型/图片.png",
+    )
+    if not download_types:
+        download_types = _all_panel_names[:]
+
     if mode == "Research":
         st.divider()
         st.markdown("**Research settings**")
         gt_dir_input = st.text_input(
-            "Ground Truth folder",
-            placeholder="/path/to/labels",
-            help="包含真实二值掩码的文件夹。文件名与原图进行模糊匹配（最长公共子串比≥0.6）。",
+            "Ground Truth folder (server path)",
+            placeholder="/absolute/path/on/server/labels",
+            help="运行 server.py 的服务端机器上的标签文件夹绝对路径。",
         )
         selected_metrics = st.multiselect(
             "Metrics to display",
@@ -471,23 +519,11 @@ if not selected_configs:
     st.error("请在侧边栏选择至少一个模型配置。", icon="🚨")
     st.stop()
 
-# ── GT 目录验证（研究模式） ──────────────────────────────────────────────────
-gt_dir: Optional[Path] = None
-if mode == "Research" and gt_dir_input.strip():
-    p = Path(gt_dir_input.strip())
-    if p.exists() and p.is_dir():
-        gt_dir = p
-        st.success(f"GT folder: `{gt_dir}`", icon="📂")
-    else:
-        st.error(f"GT 文件夹不存在：`{p}`", icon="🚨")
-
 # ─── 推理阶段 ─────────────────────────────────────────────────────────────────
-# all_results[stem][config_name] = {"probs": ndarray, "cam": ndarray}
-# all_results[stem]["_raw"] = uint8 RGB ndarray
-all_results: dict[str, dict]                  = {}
-all_gt:      dict[str, Optional[np.ndarray]]  = {}
+all_results: dict[str, dict]                 = {}
+all_gt:      dict[str, Optional[np.ndarray]] = {}
 
-n_total = len(uploaded_files) * len(selected_configs)
+n_total  = len(uploaded_files) * len(selected_configs)
 progress = st.progress(0, text="Sending to inference server…")
 task_idx = 0
 
@@ -498,9 +534,8 @@ for uf in uploaded_files:
 
     all_results[stem] = {"_raw": image}
 
-    if mode == "Research" and gt_dir is not None:
-        gp = find_gt_file(stem, gt_dir)
-        all_gt[stem] = read_gt_mask(gp) if gp else None
+    if mode == "Research" and gt_dir_input.strip():
+        all_gt[stem] = call_gt_api(server_url, gt_dir_input.strip(), stem)
 
     for cfg_name in selected_configs:
         task_idx += 1
@@ -531,145 +566,176 @@ if not valid_stems:
 n_done = sum(1 for s in valid_stems for c in selected_configs if c in all_results[s])
 st.success(f"Done — {len(valid_stems)} image(s), {n_done} inference(s) completed.", icon="✅")
 
-
-# ─── 辅助：单 panel 展示 + 下载 ──────────────────────────────────────────────
-def _panel(col, title: str, arr: np.ndarray, dl_key: str, mode_l: str = "RGB"):
-    with col:
-        st.markdown(f'<div class="img-card-title">{title}</div>', unsafe_allow_html=True)
-        st.image(arr, use_container_width=True)
+# ─── 搜索 + 全局下载 ──────────────────────────────────────────────────────────
+col_search, col_dl = st.columns([3, 1])
+with col_search:
+    search_query = st.text_input(
+        "search",
+        placeholder="🔍  Filter images by filename…",
+        label_visibility="collapsed",
+    )
+with col_dl:
+    if download_types:
+        zip_bytes = build_results_zip(
+            all_results, all_gt, selected_configs,
+            conf_threshold, overlay_alpha, heatmap_alpha,
+            download_types,
+        )
         st.download_button(
-            "⬇ Download",
-            pil_png_bytes(arr, mode=mode_l),
-            f"{dl_key}.png",
-            "image/png",
-            key=f"dl_{dl_key}",
+            "⬇ Download ZIP",
+            zip_bytes,
+            "fusnet_results.zip",
+            "application/zip",
             use_container_width=True,
         )
 
+filtered_stems = [
+    s for s in valid_stems
+    if not search_query or search_query.lower() in s.lower()
+]
+if search_query and not filtered_stems:
+    st.info(f"No images match `{search_query}`.", icon="🔍")
+    st.stop()
 
-# ─── 展示阶段 ─────────────────────────────────────────────────────────────────
+# ─── 布局：Research 模式用左右两标签页 ───────────────────────────────────────
 summary_metrics: dict[str, list[dict]] = {c: [] for c in selected_configs}
 
-for img_idx, stem in enumerate(valid_stems):
-    if img_idx > 0:
-        st.markdown('<hr class="sample-divider">', unsafe_allow_html=True)
+if mode == "Research":
+    results_tab, summary_tab = st.tabs(["🖼  Prediction Results", "📊  Summary"])
+else:
+    results_tab = st.container()
+    summary_tab = None
 
-    st.markdown(f"### {stem}")
-    raw_image = all_results[stem]["_raw"]
-    h, w      = raw_image.shape[:2]
-    gt_bool   = all_gt.get(stem)  # None in Default mode or when GT not found
 
-    if mode == "Research" and gt_dir is not None and gt_bool is None:
-        st.warning(f"未找到 `{stem}` 对应的 GT 标签文件，仅展示预测结果。", icon="⚠️")
+# ─── 辅助：单 panel 展示（无独立下载按钮，统一走 ZIP） ───────────────────────
+def _panel(col, title: str, arr: np.ndarray, mode_l: str = "RGB"):
+    with col:
+        st.markdown(f'<div class="img-card-title">{title}</div>', unsafe_allow_html=True)
+        st.image(arr, use_container_width=True)
 
-    # ── Tab 布局（研究模式每张图用 Tabs） ─────────────────────────────────────
-    if mode == "Research":
-        view_tab, metric_tab = st.tabs(["🖼  Prediction Views", "📊  Image Metrics"])
-    else:
-        view_tab   = st.container()
-        metric_tab = None
 
-    # ── 预测视图 ──────────────────────────────────────────────────────────────
-    with view_tab:
-        for ci, cfg_name in enumerate(selected_configs):
-            if cfg_name not in all_results[stem]:
-                continue
+# ─── 展示阶段 ─────────────────────────────────────────────────────────────────
+with results_tab:
+    for img_idx, stem in enumerate(filtered_stems):
+        with st.expander(f"📷  {stem}", expanded=True):
+            raw_image = all_results[stem]["_raw"]
+            h, w      = raw_image.shape[:2]
+            gt_bool   = all_gt.get(stem)
 
-            probs     = all_results[stem][cfg_name]["probs"]
-            cam       = all_results[stem][cfg_name]["cam"]
-            mask_bool = resize_mask_bool(probs >= conf_threshold, h, w)
-            mask_u8   = mask_bool.astype(np.uint8) * 255
+            if mode == "Research" and gt_dir_input.strip() and gt_bool is None:
+                st.warning(f"未找到 `{stem}` 对应的 GT 标签文件，仅展示预测结果。", icon="⚠️")
 
-            pred_blend = overlay_mask(raw_image, mask_bool, overlay_alpha, COLOR_PRED)
-            heatmap    = apply_heatmap(raw_image, cam, heatmap_alpha)
-
-            pfx = f"i{img_idx}c{ci}"
-            if ci > 0:
-                st.markdown("---")
-            st.markdown(
-                f'<div class="model-header">▸ {cfg_name}</div>',
-                unsafe_allow_html=True,
-            )
-
-            use_6 = mode == "Research" and gt_bool is not None
-            if use_6:
-                gt_r     = resize_mask_bool(gt_bool, h, w)
-                gt_u8    = gt_r.astype(np.uint8) * 255
-                gt_blend = overlay_mask(raw_image, gt_r, overlay_alpha, COLOR_GT)
-
-                c1, c2, c3, c4, c5, c6 = st.columns(6, gap="small")
-                _panel(c1, "Original",     raw_image,  f"{pfx}_orig")
-                _panel(c2, "GT Mask",      gt_u8,      f"{pfx}_gtmask",  "L")
-                _panel(c3, "Pred Mask",    mask_u8,    f"{pfx}_pmask",   "L")
-                _panel(c4, "GT Overlay",   gt_blend,   f"{pfx}_gtblend")
-                _panel(c5, "Pred Overlay", pred_blend, f"{pfx}_pblend")
-                _panel(c6, "GradCAM",      heatmap,    f"{pfx}_cam")
+            if mode == "Research":
+                view_tab, metric_tab = st.tabs(["🖼  Prediction Views", "📊  Image Metrics"])
             else:
-                c1, c2, c3, c4 = st.columns(4, gap="medium")
-                _panel(c1, "Original",     raw_image,  f"{pfx}_orig")
-                _panel(c2, "Pred Mask",    mask_u8,    f"{pfx}_pmask",   "L")
-                _panel(c3, "Pred Overlay", pred_blend, f"{pfx}_pblend")
-                _panel(c4, "GradCAM",      heatmap,    f"{pfx}_cam")
+                view_tab   = st.container()
+                metric_tab = None
 
-    # ── 逐图指标 Tab（研究模式） ──────────────────────────────────────────────
-    if mode == "Research" and metric_tab is not None:
-        with metric_tab:
-            if gt_bool is None:
-                if gt_dir is None:
-                    st.info("请在侧边栏指定 Ground Truth 文件夹路径。", icon="ℹ️")
-                else:
-                    st.warning("未找到对应 GT 文件，无法计算该图指标。", icon="⚠️")
-            else:
-                gt_r = resize_mask_bool(gt_bool, h, w)
-                img_model_metrics: dict[str, dict] = {}
-
-                for cfg_name in selected_configs:
+            with view_tab:
+                for ci, cfg_name in enumerate(selected_configs):
                     if cfg_name not in all_results[stem]:
                         continue
-                    probs     = all_results[stem][cfg_name]["probs"]
-                    mask_bool = resize_mask_bool(probs >= conf_threshold, h, w)
-                    m         = compute_metrics(mask_bool, gt_r)
-                    img_model_metrics[cfg_name] = m
-                    summary_metrics[cfg_name].append(m)
 
-                if img_model_metrics and selected_metrics:
+                    probs     = all_results[stem][cfg_name]["probs"]
+                    cam       = all_results[stem][cfg_name]["cam"]
+                    mask_bool = resize_mask_bool(probs >= conf_threshold, h, w)
+                    mask_u8   = mask_bool.astype(np.uint8) * 255
+
+                    pred_blend = overlay_mask(raw_image, mask_bool, overlay_alpha, COLOR_PRED)
+                    heatmap    = apply_heatmap(raw_image, cam, heatmap_alpha)
+
+                    if ci > 0:
+                        st.markdown("---")
                     st.markdown(
-                        f"**`{stem}` — per-model metrics** "
-                        f"(confidence threshold = {conf_threshold:.2f})"
-                    )
-                    st.markdown(
-                        paper_table_html(img_model_metrics, selected_metrics),
+                        f'<div class="model-header">▸ {cfg_name}</div>',
                         unsafe_allow_html=True,
                     )
 
+                    use_6 = mode == "Research" and gt_bool is not None
+                    if use_6:
+                        gt_r     = resize_mask_bool(gt_bool, h, w)
+                        gt_u8    = gt_r.astype(np.uint8) * 255
+                        gt_blend = overlay_mask(raw_image, gt_r, overlay_alpha, COLOR_GT)
 
-# ─── 研究模式：总体汇总 ───────────────────────────────────────────────────────
-if mode == "Research" and any(len(v) > 0 for v in summary_metrics.values()):
-    st.markdown('<hr class="sample-divider">', unsafe_allow_html=True)
-    st.markdown("## 📊  Overall Model Comparison")
+                        c1, c2, c3, c4, c5, c6 = st.columns(6, gap="small")
+                        _panel(c1, "Original",     raw_image)
+                        _panel(c2, "GT Mask",      gt_u8,    "L")
+                        _panel(c3, "Pred Mask",    mask_u8,  "L")
+                        _panel(c4, "GT Overlay",   gt_blend)
+                        _panel(c5, "Pred Overlay", pred_blend)
+                        _panel(c6, "GradCAM",      heatmap)
+                    else:
+                        c1, c2, c3, c4 = st.columns(4, gap="medium")
+                        _panel(c1, "Original",     raw_image)
+                        _panel(c2, "Pred Mask",    mask_u8,  "L")
+                        _panel(c3, "Pred Overlay", pred_blend)
+                        _panel(c4, "GradCAM",      heatmap)
 
-    avg_metrics: dict[str, dict] = {}
-    for cfg_name, mlist in summary_metrics.items():
-        if mlist:
-            avg_metrics[cfg_name] = {
-                m: float(np.mean([ml[m] for ml in mlist]))
-                for m in ALL_METRICS
-            }
+            if mode == "Research" and metric_tab is not None:
+                with metric_tab:
+                    if gt_bool is None:
+                        if not gt_dir_input.strip():
+                            st.info("请在侧边栏指定服务端 Ground Truth 文件夹路径。", icon="ℹ️")
+                        else:
+                            st.warning("未找到对应 GT 文件，无法计算该图指标。", icon="⚠️")
+                    else:
+                        gt_r = resize_mask_bool(gt_bool, h, w)
+                        img_model_metrics: dict[str, dict] = {}
 
-    if avg_metrics and selected_metrics:
-        n_imgs = max(len(v) for v in summary_metrics.values())
-        st.caption(
-            f"Averaged over **{n_imgs}** image(s) with matched GT labels  ·  "
-            f"confidence threshold = {conf_threshold:.2f}"
-        )
-        sum_tab1, sum_tab2 = st.tabs(["📋  Metrics Table", "📈  Bar Chart"])
+                        for cfg_name in selected_configs:
+                            if cfg_name not in all_results[stem]:
+                                continue
+                            probs     = all_results[stem][cfg_name]["probs"]
+                            mask_bool = resize_mask_bool(probs >= conf_threshold, h, w)
+                            m         = compute_metrics(mask_bool, gt_r)
+                            img_model_metrics[cfg_name] = m
+                            summary_metrics[cfg_name].append(m)
 
-        with sum_tab1:
-            st.markdown(
-                paper_table_html(avg_metrics, selected_metrics),
-                unsafe_allow_html=True,
-            )
+                        if img_model_metrics and selected_metrics:
+                            st.markdown(
+                                f"**`{stem}` — per-model metrics** "
+                                f"(confidence threshold = {conf_threshold:.2f})"
+                            )
+                            st.markdown(
+                                paper_table_html(img_model_metrics, selected_metrics),
+                                unsafe_allow_html=True,
+                            )
 
-        with sum_tab2:
-            chart_bytes = metrics_barchart_png(avg_metrics, selected_metrics)
-            st.image(chart_bytes, use_container_width=False)
+
+# ─── 汇总标签页（研究模式） ───────────────────────────────────────────────────
+if mode == "Research" and summary_tab is not None:
+    with summary_tab:
+        has_summary = any(len(v) > 0 for v in summary_metrics.values())
+        if not has_summary:
+            if not gt_dir_input.strip():
+                st.info("请在侧边栏指定服务端 GT 文件夹路径以启用汇总指标。", icon="ℹ️")
+            else:
+                st.info("完成至少一张带 GT 标签图片的推理后，汇总结果将显示在此处。", icon="ℹ️")
+        else:
+            avg_metrics: dict[str, dict] = {}
+            for cfg_name, mlist in summary_metrics.items():
+                if mlist:
+                    avg_metrics[cfg_name] = {
+                        m: float(np.mean([ml[m] for ml in mlist]))
+                        for m in ALL_METRICS
+                    }
+
+            if avg_metrics and selected_metrics:
+                n_imgs = max(len(v) for v in summary_metrics.values())
+                st.caption(
+                    f"Averaged over **{n_imgs}** image(s) with matched GT labels  ·  "
+                    f"confidence threshold = {conf_threshold:.2f}"
+                )
+                sum_tab1, sum_tab2 = st.tabs(["📋  Metrics Table", "📈  Bar Chart"])
+
+                with sum_tab1:
+                    st.markdown(
+                        paper_table_html(avg_metrics, selected_metrics),
+                        unsafe_allow_html=True,
+                    )
+
+                with sum_tab2:
+                    chart_bytes = metrics_barchart_png(avg_metrics, selected_metrics)
+                    _, col_chart, _ = st.columns([1, 6, 1])
+                    with col_chart:
+                        st.image(chart_bytes, use_container_width=True)

@@ -17,6 +17,8 @@ import base64
 import io
 import os
 import tempfile
+from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import torch
@@ -161,10 +163,62 @@ def _run_inference(model, image: np.ndarray):
     return probs_np, cam
 
 
+# ─── GT 文件模糊匹配 ──────────────────────────────────────────────────────────
+_GT_EXTS = {".tif", ".tiff", ".png", ".jpg", ".jpeg"}
+
+
+def _lcs_len(a: str, b: str) -> int:
+    a, b = a.lower(), b.lower()
+    prev = [0] * (len(b) + 1)
+    best = 0
+    for ca in a:
+        curr = [0] * (len(b) + 1)
+        for j, cb in enumerate(b, 1):
+            if ca == cb:
+                curr[j] = prev[j - 1] + 1
+                if curr[j] > best:
+                    best = curr[j]
+        prev = curr
+    return best
+
+
+def _find_gt_file(stem: str, gt_dir: Path) -> Optional[Path]:
+    best_f, best_r = None, 0.0
+    for f in gt_dir.iterdir():
+        if f.suffix.lower() not in _GT_EXTS:
+            continue
+        lcs   = _lcs_len(stem, f.stem)
+        ratio = lcs / max(min(len(stem), len(f.stem)), 1)
+        if ratio > best_r:
+            best_r, best_f = ratio, f
+    return best_f if best_r >= 0.6 else None
+
+
 # ─── API 端点 ─────────────────────────────────────────────────────────────────
 @app.get("/health")
 def health():
     return {"status": "ok", "device": str(_device)}
+
+
+@app.get("/gt")
+def get_gt(gt_dir: str, stem: str):
+    p = Path(gt_dir)
+    if not p.exists() or not p.is_dir():
+        raise HTTPException(404, f"GT directory not found: {gt_dir}")
+    gt_file = _find_gt_file(stem, p)
+    if gt_file is None:
+        raise HTTPException(404, f"No matching GT file for stem: {stem!r}")
+    try:
+        if gt_file.suffix.lower() in (".tif", ".tiff"):
+            import rasterio
+            with rasterio.open(str(gt_file)) as src:
+                arr = src.read(1)
+        else:
+            arr = np.array(Image.open(str(gt_file)).convert("L"))
+        mask = (arr > 0 if arr.max() <= 1 else arr > 127).astype(np.uint8)
+        return {"mask": base64.b64encode(mask.tobytes()).decode(), "shape": list(mask.shape)}
+    except Exception as exc:
+        raise HTTPException(500, f"Failed to read GT: {exc}") from exc
 
 
 @app.get("/configs")
