@@ -8,3 +8,4 @@ DeeplabV3/pretrained/
 CLAUDE.md
 __pycache__/
 visualization/
+.fusnet_session
