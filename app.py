@@ -162,6 +162,11 @@ st.markdown(
   .element-container:has([data-testid="stImage"]):hover + .element-container .img-dl-btn {
     opacity: 1;
   }
+
+  /* ── fusnet HTML panel grid (single st.markdown call per stem) ── */
+  .fusnet-panels-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.5rem; margin-bottom: 0.8rem; }
+  .fusnet-panels-6 { display: grid; grid-template-columns: repeat(6, 1fr); gap: 0.5rem; margin-bottom: 0.8rem; }
+  .fusnet-panel:hover .img-dl-btn { opacity: 1 !important; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -170,11 +175,20 @@ st.markdown(
 # ─── 常量 ─────────────────────────────────────────────────────────────────────
 COLOR_PRED = (220, 30, 30)  # red overlay for predictions
 COLOR_GT = (220, 30, 30)  # red overlay for GT (same as prediction)
-IMAGE_EXTS = {".tif", ".tiff", ".png", ".jpg", ".jpeg"}
 ALL_METRICS = ["Accuracy", "Precision", "Recall", "F1", "IoU", "mIoU"]
 
 PANEL_NAMES_DEFAULT = ["Original", "Pred_Mask", "Pred_Overlay", "GradCAM"]
 PANEL_NAMES_RESEARCH = ["Original", "GT_Mask", "Pred_Mask", "GT_Overlay", "Pred_Overlay", "GradCAM"]
+
+_ICON_DL = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"'
+    ' fill="none" stroke="currentColor" stroke-width="2.2"'
+    ' stroke-linecap="round" stroke-linejoin="round">'
+    '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>'
+    '<polyline points="7 10 12 15 17 10"/>'
+    '<line x1="12" y1="15" x2="12" y2="3"/>'
+    "</svg>"
+)
 
 # ─── 磁盘缓存工具 ─────────────────────────────────────────────────────────────
 _DISK_CACHE_DIR = Path(".fusnet_session")
@@ -188,36 +202,20 @@ def _chash(cfg: str) -> str:
     return hashlib.md5(cfg.encode()).hexdigest()[:8]
 
 
-def _save_sidebar(state: dict):
+def _json_save(fname: str, data) -> None:
     try:
         _DISK_CACHE_DIR.mkdir(exist_ok=True)
-        (_DISK_CACHE_DIR / "sidebar.json").write_text(json.dumps(state))
+        (_DISK_CACHE_DIR / fname).write_text(json.dumps(data))
     except Exception:
         pass
 
 
-def _load_sidebar() -> dict:
-    p = _DISK_CACHE_DIR / "sidebar.json"
+def _json_load(fname: str, default):
+    p = _DISK_CACHE_DIR / fname
     try:
-        return json.loads(p.read_text()) if p.exists() else {}
+        return json.loads(p.read_text()) if p.exists() else default
     except Exception:
-        return {}
-
-
-def _save_stems_meta(stems: list):
-    try:
-        _DISK_CACHE_DIR.mkdir(exist_ok=True)
-        (_DISK_CACHE_DIR / "stems.json").write_text(json.dumps(stems))
-    except Exception:
-        pass
-
-
-def _load_stems_meta() -> list:
-    p = _DISK_CACHE_DIR / "stems.json"
-    try:
-        return json.loads(p.read_text()) if p.exists() else []
-    except Exception:
-        return []
+        return default
 
 
 def _save_image_cache(name: str, size: int, arr: np.ndarray):
@@ -442,7 +440,6 @@ def call_infer_api(
 
 @st.cache_data(show_spinner=False)
 def call_gt_api(server_url: str, gt_dir: str, stem: str) -> Optional[np.ndarray]:
-    """Request GT mask from server; returns bool ndarray or None if not found."""
     try:
         r = requests.get(
             f"{server_url}/gt",
@@ -532,7 +529,7 @@ def build_results_zip(
 
 # ─── 从磁盘恢复 sidebar 状态（每个浏览器会话只初始化一次） ─────────────────────
 if "_sb_initialized" not in st.session_state:
-    for _k, _v in _load_sidebar().items():
+    for _k, _v in _json_load("sidebar.json", {}).items():
         st.session_state[_k] = _v
     st.session_state["_sb_initialized"] = True
 
@@ -643,19 +640,17 @@ with st.sidebar:
             selected_metrics = ALL_METRICS[:]
 
     # 每次渲染后将当前 sidebar 状态写入磁盘，供刷新后恢复
-    _save_sidebar(
-        {
-            "sb_mode": mode,
-            "sb_server_url": server_url,
-            "sb_selected_configs": selected_configs,
-            "sb_conf_threshold": conf_threshold,
-            "sb_heatmap_alpha": heatmap_alpha,
-            "sb_overlay_alpha": overlay_alpha,
-            "sb_download_types": download_types,
-            "sb_gt_dir_input": gt_dir_input if mode == "Research" else "",
-            "sb_selected_metrics": selected_metrics if mode == "Research" else list(ALL_METRICS),
-        }
-    )
+    _json_save("sidebar.json", {
+        "sb_mode": mode,
+        "sb_server_url": server_url,
+        "sb_selected_configs": selected_configs,
+        "sb_conf_threshold": conf_threshold,
+        "sb_heatmap_alpha": heatmap_alpha,
+        "sb_overlay_alpha": overlay_alpha,
+        "sb_download_types": download_types,
+        "sb_gt_dir_input": gt_dir_input if mode == "Research" else "",
+        "sb_selected_metrics": selected_metrics if mode == "Research" else list(ALL_METRICS),
+    })
 
 
 # ─── 主内容区 ─────────────────────────────────────────────────────────────────
@@ -671,7 +666,7 @@ if "_panel_cache" not in st.session_state:
     st.session_state["_panel_cache"] = {}
 
 # 读取磁盘缓存元数据（早于 uploader，用于判断是否可以免上传恢复）
-_disk_stems = _load_stems_meta()
+_disk_stems = _json_load("stems.json", [])
 
 uploaded_files = st.file_uploader(
     "Upload images",
@@ -778,7 +773,7 @@ else:
         progress.empty()
 
         # 推理完成后写入磁盘缓存（与已有缓存合并）
-        _existing_meta = {sm["stem"]: sm for sm in _load_stems_meta()}
+        _existing_meta = {sm["stem"]: sm for sm in _json_load("stems.json", [])}
         for uf in uploaded_files:
             stem = Path(uf.name).stem
             if stem not in all_results:
@@ -795,7 +790,7 @@ else:
             if gt is not None:
                 _save_gt_cache(uf.name, uf.size, gt)
             _existing_meta[stem] = {"stem": stem, "name": uf.name, "size": uf.size, "configs": cfg_list}
-        _save_stems_meta(list(_existing_meta.values()))
+        _json_save("stems.json", list(_existing_meta.values()))
 
         st.session_state["_infer_key"] = _infer_key
         st.session_state["_all_results"] = all_results
@@ -870,30 +865,41 @@ if search_query and not filtered_stems:
     st.info(f"No images match `{search_query}`.", icon="🔍")
     st.stop()
 
-# ─── 布局：Research 模式用左右两标签页 ───────────────────────────────────────
+# ─── 分页（每页最多 10 张，防止大量 widget 导致 WebSocket 超时） ───────────────
+_PAGE_SIZE = 10
+_n_pages = max(1, (len(filtered_stems) + _PAGE_SIZE - 1) // _PAGE_SIZE)
+if "page_idx" not in st.session_state:
+    st.session_state.page_idx = 0
+if st.session_state.get("_last_infer_key") != st.session_state.get("_infer_key"):
+    st.session_state.page_idx = 0
+    st.session_state["_last_infer_key"] = st.session_state.get("_infer_key")
+st.session_state.page_idx = max(0, min(st.session_state.page_idx, _n_pages - 1))
+_p0 = st.session_state.page_idx * _PAGE_SIZE
+page_stems = filtered_stems[_p0 : _p0 + _PAGE_SIZE]
+
+# ─── Research 模式：对全部图片预计算汇总指标（避免翻页后 summary 数据缺失） ────
 summary_metrics: dict[str, list[dict]] = {c: [] for c in selected_configs}
-
 if mode == "Research":
-    results_tab, summary_tab = st.tabs(["🖼  Prediction Results", "📊  Summary"])
-else:
-    results_tab = st.container()
-    summary_tab = None
-
-
-# ─── 下载按钮 SVG 图标（与 Streamlit 全屏按钮风格一致） ────────────────────
-_ICON_DL = (
-    '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"'
-    ' fill="none" stroke="currentColor" stroke-width="2.2"'
-    ' stroke-linecap="round" stroke-linejoin="round">'
-    '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>'
-    '<polyline points="7 10 12 15 17 10"/>'
-    '<line x1="12" y1="15" x2="12" y2="3"/>'
-    "</svg>"
-)
+    _sm_key = (st.session_state.get("_infer_key"), conf_threshold, tuple(sorted(selected_configs)))
+    if st.session_state.get("_sm_cache_key") != _sm_key:
+        _sm_data: dict[str, list[dict]] = {c: [] for c in selected_configs}
+        for _s in valid_stems:
+            _gt = all_gt.get(_s)
+            if _gt is None:
+                continue
+            _h, _w = all_results[_s]["_raw"].shape[:2]
+            _gt_r = resize_mask_bool(_gt, _h, _w)
+            for _cfg in selected_configs:
+                if _cfg not in all_results[_s]:
+                    continue
+                _mb = resize_mask_bool(all_results[_s][_cfg]["probs"] >= conf_threshold, _h, _w)
+                _sm_data[_cfg].append(compute_metrics(_mb, _gt_r))
+        st.session_state["_sm_cache_key"] = _sm_key
+        st.session_state["_sm_data"] = _sm_data
+    summary_metrics = st.session_state["_sm_data"]
 
 
 def _dl_float_html(img_bytes: bytes, filename: str) -> str:
-    """Zero-height div with download link, pulled up into the image via negative margin."""
     b64 = base64.b64encode(img_bytes).decode()
     data_uri = f"data:image/png;base64,{b64}"
     return (
@@ -904,26 +910,153 @@ def _dl_float_html(img_bytes: bytes, filename: str) -> str:
     )
 
 
-# ─── 辅助：单 panel 展示（原生全屏 + 悬停下载按钮） ──────────────────────────
-def _panel(
-    col, title: str, arr: np.ndarray, mode_l: str = "RGB", stem: str = "", cfg: str = "", img_bytes: bytes = None
-):
-    parts = [x for x in [stem, cfg.replace("/", "_").replace(" ", "_")] if x]
-    fname = "_".join(parts + [title.replace(" ", "_")]) + ".png"
-    with col:
-        st.markdown(f'<div class="img-card-title">{title}</div>', unsafe_allow_html=True)
-        st.image(arr, use_container_width=True)
-        if img_bytes is None:
-            img_bytes = pil_png_bytes(arr, mode_l)
-        st.markdown(_dl_float_html(img_bytes, fname), unsafe_allow_html=True)
+def _panel_html(title: str, b64: str, fname: str) -> str:
+    uri = f"data:image/png;base64,{b64}"
+    return (
+        f'<div class="fusnet-panel">'
+        f'<div class="img-card-title">{title}</div>'
+        f'<div style="position:relative">'
+        f'<img src="{uri}" style="width:100%;display:block;border-radius:4px">'
+        f'<div style="position:absolute;top:0.3rem;right:0.3rem">'
+        f'<a href="{uri}" download="{fname}" class="img-dl-btn" title="Download">{_ICON_DL}</a>'
+        f'</div></div></div>'
+    )
+
+
+# ─── 渲染缓存（PNG + base64 + HTML 预计算，仅在关键参数改变时重建） ────────────
+_render_key = (conf_threshold, overlay_alpha, heatmap_alpha)
+_panel_render_key = (
+    st.session_state.get("_infer_key"),
+    _render_key,
+    mode,
+    tuple(sorted(selected_configs)),
+    tuple(selected_metrics) if mode == "Research" else (),
+)
+
+if st.session_state.get("_panel_render_key") != _panel_render_key:
+    _new_pcache: dict = {}
+    _safe_name = lambda n: n.replace("/", "_").replace(" ", "_")
+
+    for _stem in valid_stems:
+        _raw = all_results[_stem]["_raw"]
+        _h, _w = _raw.shape[:2]
+
+        _raw_b64 = base64.b64encode(pil_png_bytes(_raw)).decode()
+
+        # ── GT ──
+        _gt = all_gt.get(_stem)
+        _gc_entry: Optional[dict] = None
+        if _gt is not None:
+            _gr = resize_mask_bool(_gt, _h, _w)
+            _gt_u8 = pil_png_bytes(_gr.astype(np.uint8) * 255, "L")
+            _gt_bl = pil_png_bytes(overlay_mask(_raw, _gr, overlay_alpha, COLOR_GT))
+            _gc_entry = {
+                "gt_r": _gr,
+                "gt_u8_b64": base64.b64encode(_gt_u8).decode(),
+                "gt_blend_b64": base64.b64encode(_gt_bl).decode(),
+            }
+
+        # ── per-config predictions ──
+        _cfg_entries: dict = {}
+        for _cfg in selected_configs:
+            if _cfg not in all_results[_stem]:
+                continue
+            _probs = all_results[_stem][_cfg]["probs"]
+            _cam = all_results[_stem][_cfg]["cam"]
+            _mb = resize_mask_bool(_probs >= conf_threshold, _h, _w)
+            _mu8 = pil_png_bytes(_mb.astype(np.uint8) * 255, "L")
+            _pb = pil_png_bytes(overlay_mask(_raw, _mb, overlay_alpha, COLOR_PRED))
+            _hm = pil_png_bytes(apply_heatmap(_raw, _cam, heatmap_alpha))
+            _cfg_entries[_cfg] = {
+                "mask_bool": _mb,
+                "mask_u8_b64": base64.b64encode(_mu8).decode(),
+                "pred_blend_b64": base64.b64encode(_pb).decode(),
+                "heatmap_b64": base64.b64encode(_hm).decode(),
+            }
+
+        # ── pre-build view HTML (single st.markdown call per stem) ──
+        _vparts: list = []
+        for _ci, _cfg in enumerate(selected_configs):
+            if _cfg not in _cfg_entries:
+                continue
+            _ce = _cfg_entries[_cfg]
+            _sc = _safe_name(_cfg)
+            _use6 = mode == "Research" and _gc_entry is not None
+            _ncols = 6 if _use6 else 4
+            if _ci > 0:
+                _vparts.append('<hr class="sample-divider" style="margin:0.8rem 0">')
+            _vparts.append(f'<div class="model-header">▸ {_cfg}</div>')
+            _vparts.append(f'<div class="fusnet-panels-{_ncols}">')
+            _pd = [("Original", _raw_b64, f"{_stem}_{_sc}_Original.png")]
+            if _use6:
+                _pd += [
+                    ("GT Mask",      _gc_entry["gt_u8_b64"],    f"{_stem}_{_sc}_GT_Mask.png"),
+                    ("Pred Mask",    _ce["mask_u8_b64"],         f"{_stem}_{_sc}_Pred_Mask.png"),
+                    ("GT Overlay",   _gc_entry["gt_blend_b64"],  f"{_stem}_{_sc}_GT_Overlay.png"),
+                    ("Pred Overlay", _ce["pred_blend_b64"],      f"{_stem}_{_sc}_Pred_Overlay.png"),
+                    ("GradCAM",      _ce["heatmap_b64"],         f"{_stem}_{_sc}_GradCAM.png"),
+                ]
+            else:
+                _pd += [
+                    ("Pred Mask",    _ce["mask_u8_b64"],    f"{_stem}_{_sc}_Pred_Mask.png"),
+                    ("Pred Overlay", _ce["pred_blend_b64"], f"{_stem}_{_sc}_Pred_Overlay.png"),
+                    ("GradCAM",      _ce["heatmap_b64"],    f"{_stem}_{_sc}_GradCAM.png"),
+                ]
+            for _t, _b, _fn in _pd:
+                _vparts.append(_panel_html(_t, _b, _fn))
+            _vparts.append("</div>")
+        _new_pcache[("_view_html", _stem)] = "".join(_vparts)
+
+        # ── pre-build metrics HTML (Research + GT only) ──
+        if mode == "Research" and _gc_entry is not None and _cfg_entries and selected_metrics:
+            _im: dict = {
+                _cfg: compute_metrics(_ce["mask_bool"], _gc_entry["gt_r"])
+                for _cfg, _ce in _cfg_entries.items()
+            }
+            _new_pcache[("_metrics_html", _stem)] = (
+                f"<p><strong><code>{_stem}</code> — per-model metrics"
+                f" (confidence threshold = {conf_threshold:.2f})</strong></p>"
+                + paper_table_html(_im, selected_metrics)
+            )
+        else:
+            _new_pcache[("_metrics_html", _stem)] = None
+
+    st.session_state["_panel_cache"] = _new_pcache
+    st.session_state["_panel_render_key"] = _panel_render_key
+
+# ─── 布局：Research 模式用左右两标签页 ───────────────────────────────────────
+if mode == "Research":
+    results_tab, summary_tab = st.tabs(["🖼  Prediction Results", "📊  Summary"])
+else:
+    results_tab = st.container()
+    summary_tab = None
 
 
 # ─── 展示阶段 ─────────────────────────────────────────────────────────────────
 with results_tab:
-    for img_idx, stem in enumerate(filtered_stems):
+    if _n_pages > 1:
+        _pc1, _pc2, _pc3 = st.columns([1, 4, 1])
+        with _pc1:
+            if st.button("◀ Prev", disabled=st.session_state.page_idx == 0, use_container_width=True, key="pg_prev_t"):
+                st.session_state.page_idx -= 1
+                st.rerun()
+        with _pc2:
+            st.markdown(
+                f"<div style='text-align:center;padding:6px 0;"
+                f"color:#6b7280;font-size:0.9rem;'>"
+                f"Page {st.session_state.page_idx + 1} / {_n_pages}"
+                f" &nbsp;·&nbsp; {len(filtered_stems)} images total</div>",
+                unsafe_allow_html=True,
+            )
+        with _pc3:
+            if st.button(
+                "Next ▶", disabled=st.session_state.page_idx == _n_pages - 1, use_container_width=True, key="pg_next_t"
+            ):
+                st.session_state.page_idx += 1
+                st.rerun()
+
+    for stem in page_stems:
         with st.expander(f"📷  {stem}", expanded=st.session_state.expanders_expanded):
-            raw_image = all_results[stem]["_raw"]
-            h, w = raw_image.shape[:2]
             gt_bool = all_gt.get(stem)
 
             if mode == "Research" and gt_dir_input.strip() and gt_bool is None:
@@ -936,80 +1069,9 @@ with results_tab:
                 metric_tab = None
 
             with view_tab:
-                _pcache = st.session_state["_panel_cache"]
-
-                _raw_key = ("_raw", stem)
-                if _raw_key not in _pcache:
-                    _pcache[_raw_key] = pil_png_bytes(raw_image)
-                raw_png = _pcache[_raw_key]
-
-                for ci, cfg_name in enumerate(selected_configs):
-                    if cfg_name not in all_results[stem]:
-                        continue
-
-                    probs = all_results[stem][cfg_name]["probs"]
-                    cam = all_results[stem][cfg_name]["cam"]
-
-                    _pred_key = (stem, cfg_name, conf_threshold, overlay_alpha, heatmap_alpha)
-                    if _pred_key not in _pcache:
-                        mb = resize_mask_bool(probs >= conf_threshold, h, w)
-                        mu8 = mb.astype(np.uint8) * 255
-                        pb = overlay_mask(raw_image, mb, overlay_alpha, COLOR_PRED)
-                        hm = apply_heatmap(raw_image, cam, heatmap_alpha)
-                        _pcache[_pred_key] = {
-                            "mask_bool": mb,
-                            "mask_u8": mu8,
-                            "mask_u8_png": pil_png_bytes(mu8, "L"),
-                            "pred_blend": pb,
-                            "pred_blend_png": pil_png_bytes(pb),
-                            "heatmap": hm,
-                            "heatmap_png": pil_png_bytes(hm),
-                        }
-                    pc = _pcache[_pred_key]
-                    mask_bool = pc["mask_bool"]
-                    mask_u8 = pc["mask_u8"]
-                    pred_blend = pc["pred_blend"]
-                    heatmap = pc["heatmap"]
-
-                    if ci > 0:
-                        st.markdown("---")
-                    st.markdown(
-                        f'<div class="model-header">▸ {cfg_name}</div>',
-                        unsafe_allow_html=True,
-                    )
-
-                    use_6 = mode == "Research" and gt_bool is not None
-                    if use_6:
-                        _gt_key = (stem, overlay_alpha)
-                        if _gt_key not in _pcache:
-                            gr = resize_mask_bool(gt_bool, h, w)
-                            gu8 = gr.astype(np.uint8) * 255
-                            gb = overlay_mask(raw_image, gr, overlay_alpha, COLOR_GT)
-                            _pcache[_gt_key] = {
-                                "gt_r": gr,
-                                "gt_u8": gu8,
-                                "gt_u8_png": pil_png_bytes(gu8, "L"),
-                                "gt_blend": gb,
-                                "gt_blend_png": pil_png_bytes(gb),
-                            }
-                        gc = _pcache[_gt_key]
-                        gt_r = gc["gt_r"]
-                        gt_u8 = gc["gt_u8"]
-                        gt_blend = gc["gt_blend"]
-
-                        c1, c2, c3, c4, c5, c6 = st.columns(6, gap="small")
-                        _panel(c1, "Original", raw_image, stem=stem, cfg=cfg_name, img_bytes=raw_png)
-                        _panel(c2, "GT Mask", gt_u8, "L", stem=stem, cfg=cfg_name, img_bytes=gc["gt_u8_png"])
-                        _panel(c3, "Pred Mask", mask_u8, "L", stem=stem, cfg=cfg_name, img_bytes=pc["mask_u8_png"])
-                        _panel(c4, "GT Overlay", gt_blend, stem=stem, cfg=cfg_name, img_bytes=gc["gt_blend_png"])
-                        _panel(c5, "Pred Overlay", pred_blend, stem=stem, cfg=cfg_name, img_bytes=pc["pred_blend_png"])
-                        _panel(c6, "GradCAM", heatmap, stem=stem, cfg=cfg_name, img_bytes=pc["heatmap_png"])
-                    else:
-                        c1, c2, c3, c4 = st.columns(4, gap="medium")
-                        _panel(c1, "Original", raw_image, stem=stem, cfg=cfg_name, img_bytes=raw_png)
-                        _panel(c2, "Pred Mask", mask_u8, "L", stem=stem, cfg=cfg_name, img_bytes=pc["mask_u8_png"])
-                        _panel(c3, "Pred Overlay", pred_blend, stem=stem, cfg=cfg_name, img_bytes=pc["pred_blend_png"])
-                        _panel(c4, "GradCAM", heatmap, stem=stem, cfg=cfg_name, img_bytes=pc["heatmap_png"])
+                _view_html = st.session_state["_panel_cache"].get(("_view_html", stem), "")
+                if _view_html:
+                    st.markdown(_view_html, unsafe_allow_html=True)
 
             if mode == "Research" and metric_tab is not None:
                 with metric_tab:
@@ -1019,32 +1081,32 @@ with results_tab:
                         else:
                             st.warning("未找到对应 GT 文件，无法计算该图指标。", icon="⚠️")
                     else:
-                        gt_r = resize_mask_bool(gt_bool, h, w)
-                        img_model_metrics: dict[str, dict] = {}
+                        _mhtml = st.session_state["_panel_cache"].get(("_metrics_html", stem))
+                        if _mhtml:
+                            st.markdown(_mhtml, unsafe_allow_html=True)
+                        else:
+                            st.info("暂无指标数据。", icon="ℹ️")
 
-                        _pcache = st.session_state["_panel_cache"]
-                        for cfg_name in selected_configs:
-                            if cfg_name not in all_results[stem]:
-                                continue
-                            _pred_key = (stem, cfg_name, conf_threshold, overlay_alpha, heatmap_alpha)
-                            if _pred_key in _pcache:
-                                mask_bool = _pcache[_pred_key]["mask_bool"]
-                            else:
-                                probs = all_results[stem][cfg_name]["probs"]
-                                mask_bool = resize_mask_bool(probs >= conf_threshold, h, w)
-                            m = compute_metrics(mask_bool, gt_r)
-                            img_model_metrics[cfg_name] = m
-                            summary_metrics[cfg_name].append(m)
-
-                        if img_model_metrics and selected_metrics:
-                            st.markdown(
-                                f"**`{stem}` — per-model metrics** " f"(confidence threshold = {conf_threshold:.2f})"
-                            )
-                            st.markdown(
-                                paper_table_html(img_model_metrics, selected_metrics),
-                                unsafe_allow_html=True,
-                            )
-
+    if _n_pages > 1:
+        _bc1, _bc2, _bc3 = st.columns([1, 4, 1])
+        with _bc1:
+            if st.button("◀ Prev", disabled=st.session_state.page_idx == 0, use_container_width=True, key="pg_prev_b"):
+                st.session_state.page_idx -= 1
+                st.rerun()
+        with _bc2:
+            st.markdown(
+                f"<div style='text-align:center;padding:6px 0;"
+                f"color:#6b7280;font-size:0.9rem;'>"
+                f"Page {st.session_state.page_idx + 1} / {_n_pages}"
+                f" &nbsp;·&nbsp; {len(filtered_stems)} images total</div>",
+                unsafe_allow_html=True,
+            )
+        with _bc3:
+            if st.button(
+                "Next ▶", disabled=st.session_state.page_idx == _n_pages - 1, use_container_width=True, key="pg_next_b"
+            ):
+                st.session_state.page_idx += 1
+                st.rerun()
 
 # ─── 汇总标签页（研究模式） ───────────────────────────────────────────────────
 if mode == "Research" and summary_tab is not None:
