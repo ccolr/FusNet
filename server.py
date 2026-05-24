@@ -17,6 +17,8 @@ import base64
 import io
 import os
 import tempfile
+from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import torch
@@ -27,7 +29,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 from torchvision import transforms
 
-# ─── 模型配置（与 app.py 保持一致） ──────────────────────────────────────────
+# ─── 模型配置 ─────────────────────────────────────────────────────────────────
 MODEL_CONFIGS: dict[str, dict] = {
     "Res2Net + Swin-T + MambaVision (Full)": {
         "active_branches": ["res2net", "swin", "mamba"],
@@ -51,7 +53,7 @@ MEAN = [55.7578 / 255, 67.4502 / 255, 58.6568 / 255]
 STD  = [37.5201 / 255, 34.2345 / 255, 30.3007 / 255]
 
 # ─── FastAPI ──────────────────────────────────────────────────────────────────
-app = FastAPI(title="FusNet Inference Server", version="1.0")
+app = FastAPI(title="FusNet Inference Server", version="2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -59,8 +61,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ─── 模型缓存（进程级，按 config_name 键懒加载） ─────────────────────────────
-_model_cache: dict[str, tuple] = {}
+_model_cache: dict[str, object] = {}
 _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
@@ -139,6 +140,7 @@ class _GradCAM:
 
 
 def _run_inference(model, image: np.ndarray):
+    """Returns (probs_np, cam) where probs_np is float32 [0,1] at original resolution."""
     orig_h, orig_w = image.shape[:2]
     tensor = _preprocess(image).to(_device)
 
@@ -146,25 +148,77 @@ def _run_inference(model, image: np.ndarray):
         logits = model(tensor)
         if isinstance(logits, (tuple, list)):
             logits = logits[0]
-        logits    = F.interpolate(logits, size=(orig_h, orig_w),
-                                  mode="bilinear", align_corners=False)
-        probs     = torch.softmax(logits, dim=1)[:, 1, :, :]
-        mask_bool = (probs >= 0.5).squeeze(0).cpu().numpy()  # bool (H, W)
+        logits   = F.interpolate(logits, size=(orig_h, orig_w),
+                                 mode="bilinear", align_corners=False)
+        probs_t  = torch.softmax(logits, dim=1)[:, 1, :, :]
+        probs_np = probs_t.squeeze(0).cpu().numpy().astype(np.float32)
 
     target_layer = model.decoder[-1].conv
     gradcam      = _GradCAM(model, target_layer)
     tensor_grad  = _preprocess(image).to(_device)
     tensor_grad.requires_grad_(True)
-    cam = gradcam(tensor_grad)  # float32 (H', W')
+    cam = gradcam(tensor_grad)
     gradcam.remove()
 
-    return mask_bool, cam
+    return probs_np, cam
+
+
+# ─── GT 文件模糊匹配 ──────────────────────────────────────────────────────────
+_GT_EXTS = {".tif", ".tiff", ".png", ".jpg", ".jpeg"}
+
+
+def _lcs_len(a: str, b: str) -> int:
+    a, b = a.lower(), b.lower()
+    prev = [0] * (len(b) + 1)
+    best = 0
+    for ca in a:
+        curr = [0] * (len(b) + 1)
+        for j, cb in enumerate(b, 1):
+            if ca == cb:
+                curr[j] = prev[j - 1] + 1
+                if curr[j] > best:
+                    best = curr[j]
+        prev = curr
+    return best
+
+
+def _find_gt_file(stem: str, gt_dir: Path) -> Optional[Path]:
+    best_f, best_r = None, 0.0
+    for f in gt_dir.iterdir():
+        if f.suffix.lower() not in _GT_EXTS:
+            continue
+        lcs   = _lcs_len(stem, f.stem)
+        ratio = lcs / max(min(len(stem), len(f.stem)), 1)
+        if ratio > best_r:
+            best_r, best_f = ratio, f
+    return best_f if best_r >= 0.6 else None
 
 
 # ─── API 端点 ─────────────────────────────────────────────────────────────────
 @app.get("/health")
 def health():
     return {"status": "ok", "device": str(_device)}
+
+
+@app.get("/gt")
+def get_gt(gt_dir: str, stem: str):
+    p = Path(gt_dir)
+    if not p.exists() or not p.is_dir():
+        raise HTTPException(404, f"GT directory not found: {gt_dir}")
+    gt_file = _find_gt_file(stem, p)
+    if gt_file is None:
+        raise HTTPException(404, f"No matching GT file for stem: {stem!r}")
+    try:
+        if gt_file.suffix.lower() in (".tif", ".tiff"):
+            import rasterio
+            with rasterio.open(str(gt_file)) as src:
+                arr = src.read(1)
+        else:
+            arr = np.array(Image.open(str(gt_file)).convert("L"))
+        mask = (arr > 0 if arr.max() <= 1 else arr > 127).astype(np.uint8)
+        return {"mask": base64.b64encode(mask.tobytes()).decode(), "shape": list(mask.shape)}
+    except Exception as exc:
+        raise HTTPException(500, f"Failed to read GT: {exc}") from exc
 
 
 @app.get("/configs")
@@ -194,23 +248,20 @@ async def infer(
     image = _read_image(data, file.filename or "image.png")
 
     try:
-        model          = _load_model(config_name)
-        mask_bool, cam = _run_inference(model, image)
+        model        = _load_model(config_name)
+        probs_np, cam = _run_inference(model, image)
     except Exception as exc:
         raise HTTPException(500, f"Inference failed: {exc}") from exc
 
-    # mask → base64 PNG (grayscale)
-    mask_buf = io.BytesIO()
-    Image.fromarray((mask_bool.astype(np.uint8)) * 255, mode="L").save(mask_buf, format="PNG")
-    mask_b64 = base64.b64encode(mask_buf.getvalue()).decode()
-
-    # cam → base64 raw float32 bytes（附带 shape，客户端重建 ndarray）
-    cam_b64 = base64.b64encode(cam.tobytes()).decode()
+    # probs → base64 raw float32 bytes + shape (client applies threshold locally)
+    probs_b64 = base64.b64encode(probs_np.tobytes()).decode()
+    cam_b64   = base64.b64encode(cam.tobytes()).decode()
 
     return {
-        "mask":      mask_b64,
-        "cam":       cam_b64,
-        "cam_shape": list(cam.shape),
+        "probs":       probs_b64,
+        "probs_shape": list(probs_np.shape),
+        "cam":         cam_b64,
+        "cam_shape":   list(cam.shape),
     }
 
 
