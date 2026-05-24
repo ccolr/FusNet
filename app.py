@@ -261,6 +261,15 @@ def _clear_disk_cache():
         shutil.rmtree(_DISK_CACHE_DIR)
 
 
+@st.cache_resource
+def _register_cleanup_handler() -> bool:
+    import atexit
+    atexit.register(_clear_disk_cache)
+    return True
+
+_register_cleanup_handler()
+
+
 # ─── 图像工具 ─────────────────────────────────────────────────────────────────
 def read_image_bytes(data: bytes, filename: str) -> np.ndarray:
     if filename.lower().endswith((".tif", ".tiff")):
@@ -533,6 +542,12 @@ if "_sb_initialized" not in st.session_state:
         st.session_state[_k] = _v
     st.session_state["_sb_initialized"] = True
 
+# 保证 widget key 在 session_state 中有默认值，避免同时传 value= 引发冲突警告
+st.session_state.setdefault("sb_server_url", "http://localhost:8000")
+st.session_state.setdefault("sb_conf_threshold", 0.5)
+st.session_state.setdefault("sb_heatmap_alpha", 0.5)
+st.session_state.setdefault("sb_overlay_alpha", 0.45)
+
 # ─── 侧边栏 ───────────────────────────────────────────────────────────────────
 selected_metrics: list = ALL_METRICS[:]
 gt_dir_input: str = ""
@@ -555,7 +570,6 @@ with st.sidebar:
 
     server_url = st.text_input(
         "Inference server URL",
-        value="http://localhost:8000",
         key="sb_server_url",
         help="远端 server.py 的地址。SSH 端口转发后填 http://localhost:<port>",
     ).rstrip("/")
@@ -592,17 +606,16 @@ with st.sidebar:
 
     conf_threshold = st.slider(
         "Confidence threshold",
-        0.0,
-        1.0,
-        0.5,
-        0.01,
+        min_value=0.0,
+        max_value=1.0,
+        step=0.01,
         key="sb_conf_threshold",
         help="像素判定为竹林的概率下限，调节不重新推理（本地实时计算）",
     )
     heatmap_alpha = st.slider(
-        "Heatmap blend α", 0.1, 0.9, 0.5, 0.05, key="sb_heatmap_alpha", help="热力图与原图混合比例"
+        "Heatmap blend α", min_value=0.1, max_value=0.9, step=0.05, key="sb_heatmap_alpha", help="热力图与原图混合比例"
     )
-    overlay_alpha = st.slider("Mask overlay α", 0.1, 0.9, 0.45, 0.05, key="sb_overlay_alpha", help="掩码叠加层不透明度")
+    overlay_alpha = st.slider("Mask overlay α", min_value=0.1, max_value=0.9, step=0.05, key="sb_overlay_alpha", help="掩码叠加层不透明度")
 
     st.divider()
     _all_panel_names = PANEL_NAMES_RESEARCH if mode == "Research" else PANEL_NAMES_DEFAULT
