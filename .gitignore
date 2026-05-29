@@ -9,3 +9,4 @@ CLAUDE.md
 __pycache__/
 visualization/
 .fusnet_session
+.venv/
